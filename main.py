@@ -1258,7 +1258,7 @@ def halaman_utama():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JABRIG v3.0 — JARVIS • ULTRON • BRAHMA AI</title>
+<title>Jabrig — Sistem Kecerdasan Terpadu</title>
 <style>
 :root {{
   --bg: #03040a;
@@ -1412,8 +1412,8 @@ button:hover {{ filter: brightness(1.1); }}
 </head>
 <body>
 
-<h1>⚡ JABRIG</h1>
-<p class="subtitle">JARVIS • ULTRON • BRAHMA AI  |  v3.0  |  {MODE}</p>
+<h1>⚡ Jabrig</h1>
+<p class="subtitle">Sistem Kecerdasan Terpadu • Gemini → 9Router → JEV  |  v3.0  |  {MODE}</p>
 
 <div class="kotak">
   <h3>🧭 Status Sistem</h3>
