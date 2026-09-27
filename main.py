@@ -1179,6 +1179,22 @@ jev = JevSupervisor()
 # Hubungkan HERMES ke AI
 hermes.set_ai(ai)
 
+import atexit
+
+# Tutup klien HTTP Jev saat proses berakhir
+def _close_jev_client():
+    if "jev" in globals():
+        try:
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+            if loop.is_running():
+                loop.run_until_complete(jev.tutup())
+            else:
+                loop.run_until_complete(jev.tutup())
+        except Exception as e:
+            logger.warning(f"Gagal menutup klien JEV: {e}")
+
+atexit.register(_close_jev_client)
+
 # ─────────────────────────────────────────────────────────────
 #  🌐 ANTARMUKA WEB — FASTAPI
 # ─────────────────────────────────────────────────────────────
