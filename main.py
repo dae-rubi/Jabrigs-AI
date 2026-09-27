@@ -1,1204 +1,637 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-====================================================================
-  JABRIG • SISTEM KECERDASAN TERPADU
-  Versi: 3.0 | Tanggal: 2026-09-27
-  Perangkat: Vivo Y19s / Android Termux / PC
-  Tanpa Root • Tanpa ADB Wajib • Termux:API
-====================================================================
-
-  ARSITEKTUR:
-    ANTARMUKA PENGGUNA
-    ├── JARVIS   → Wawancara, interaksi bahasa, respons ramah
-    ├── ULTRON   → Kontrol perangkat, eksekusi perintah, status sistem
-    └── BRAHMA AI → Pemahaman mendalam, analisis, penyimpanan pengetahuan
-
-    PENGELOLA ALUR
-    └── HERMES   → Pengarah pesan, putuskan siapa yang menjawab, koordinasi
-
-    SUMBER KECERDASAN
-    ├── GEMINI 2.0 FLASH  → Utama, cepat, percakapan umum
-    └── 9ROUTER           → Cadangan, lokal, jika Gemini tidak tersedia
-
-  ALUR CHAT:
-    1. PENGGUNA mengirim pesan
-    2. HERMES menerima → analisis jenis pesan
-       ├── Perintah perangkat → ULTRON
-       ├── Percakapan/pertanyaan → GEMINI → 9ROUTER
-       ├── Butuh pengetahuan mendalam → BRAHMA AI
-       └── Sambutan/perkenalan → JARVIS
-    3. Hasil dikembalikan ke HERMES → susun jawaban → tampilkan
-    4. BRAHMA AI menyimpan percakapan untuk ingatan
-
-  DIPASANG SECARA OTOMATIS:
-    - Deteksi HP Termux / PC
-    - Termux:API tanpa root dan tanpa ADB wajib
-    - Kendali perangkat: buka/tutup aplikasi, layar, notifikasi
-    - AI: Gemini (utama) → 9Router (cadangan)
-    - Web UI sederhana berjalan di http://localhost:8000
-====================================================================
+JABRIG — Sistem Kecerdasan Terpadu
+Versi: 3.0 | Tanggal: 2026-09-27
+Perangkat: Vivo Y19s / Android Termux / PC
+Tanpa Root • Tanpa ADB Wajib • Termux:API
 """
 
-# ─────────────────────────────────────────────────────────────
-#  IMPOR & KONSTAN GLOBAL
-# ─────────────────────────────────────────────────────────────
-import os
-import sys
-import time
+import asyncio
 import json
-import secrets
+import logging
+import os
+import platform as _platform
 import re
 import subprocess
-import uuid
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Optional
 
-import asyncio
-import httpx
-
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
-from jose import jwt
-from passlib.context import CryptContext
-
-import uvicorn
-import logging
-import logging.handlers
-
-# ─────────────────────────────────────────────────────────────
-#  Logging
-# ─────────────────────────────────────────────────────────────
+# Logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("jabrig")
 
-# Redirect print() yang ada ke logger (opsional — untuk compat dengan print yang ada)
-class _PrintToLogger:
-    def write(self, msg):
-        if msg.strip():
-            logger.info(msg.rstrip("\n"))
+# ---------------------------------------------------------------------------
+# 1. Deteksi platform otomatis
+# ---------------------------------------------------------------------------
 
-    def flush(self):
-        pass
+IS_TERMUX = "com.termux" in os.environ.get("PREFIX", "")
+PERANGKAT = "HP Android (Termux)" if IS_TERMUX else "PC / Laptop"
+logger.info("Deteksi platform: %s (%s)", PERANGKAT, "Termux" if IS_TERMUX else "non-Termux")
 
-import sys
-sys.stdout = _PrintToLogger()
-sys.stderr = logging.StreamHandler(sys.stderr)
+GUNAKAN_TERMUX_API = IS_TERMUX
+GUNAKAN_ADB = False
 
-
-# ─────────────────────────────────────────────────────────────
-#  DETEKSI & KONFIGURASI PLATFORM OTOMATIS
-# ─────────────────────────────────────────────────────────────
-logger.info("=" * 64)
-logger.info("  ⚡ JABRIG — SISTEM KECERDASAN TERPADU  v3.0")
-logger.info("=" * 64)
-
-TERMITUS_PREFIX = os.environ.get("PREFIX", "")
-IS_TERMUX = "com.termux" in TERMITUS_PREFIX
-MODE: str = "HP_ANDROID" if IS_TERMUX else "PC"
-logger.info(f"  📱 Perangkat  : {MODE} {' (Termux)' if IS_TERMUX else ' (PC/Laptop)'}")
-
-KENDALI: str = "TERMUX_API" if IS_TERMUX else None
 if not IS_TERMUX:
-    jawab = input("  Aktifkan kendali perangkat via ADB? (y/n): ").strip().lower()
-    KENDALI = "ADB" if jawab.startswith("y") else "TIDAK_AKTIF"
+    try:
+        jawab = input("Aktifkan kendali via ADB? (y/n): ").strip().lower()
+        GUNAKAN_ADB = jawab.startswith("y")
+    except Exception:
+        GUNAKAN_ADB = False
 
-logger.info(f"  🎮 Kendali    : {KENDALI}")
-logger.info("=" * 64)
+MODE_KENDALI = "termux_api" if GUNAKAN_TERMUX_API else ("adb" if GUNAKAN_ADB else "tidak_aktif")
+logger.info("Mode kendali: %s", MODE_KENDALI)
 
-# Kunci API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-ROUTER_API_URL = os.getenv("ROUTER_API_URL", "http://localhost:20128")
-ROUTER_API_KEY = os.getenv("ROUTER_API_KEY", "")
+BASE_DIR = Path(__file__).resolve().parent
 
-# Paket aplikasi yang dikenali
-APLIKASI_DAFTAR: Dict[str, str] = {
-    "whatsapp":    "com.whatsapp",
-    "telegram":    "org.telegram.messenger",
-    "youtube":     "com.google.android.youtube",
-    "pengaturan":  "com.android.settings",
-    "kamera":      "com.android.camera",
-    "galeri":      "com.android.gallery3d",
-    "kalkulator":  "com.android.calculator2",
-}
+# ---------------------------------------------------------------------------
+# 2. Konfigurasi (config/) — model Mark-LV
+# ---------------------------------------------------------------------------
 
-# ─────────────────────────────────────────────────────────────
-#  🔐 SISTEM KEAMANAN (opsional, untuk API auth)
-# ─────────────────────────────────────────────────────────────
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+try:
+    from config import get_gemini_key, get_router_url, get_router_key
+except Exception as e:
+    logger.warning("Gagal import config: %s", e)
 
-RAHASIA_JWT: Optional[str] = None
-if os.path.exists("./jabrig_kunci.json"):
-    with open("./jabrig_kunci.json") as f:
-        RAHASIA_JWT = json.load(f).get("kunci", "")
+    def _dummy():
+        return ""
 
-if not RAHASIA_JWT:
-    RAHASIA_JWT = secrets.token_hex(32)
-    with open("./jabrig_kunci.json", "w") as f:
-        json.dump({"kunci": RAHASIA_JWT}, f)
+    get_gemini_key = _dummy
+    get_router_url = lambda: "http://localhost:20128"
+    get_router_key = _dummy
 
+GEMINI_API_KEY = get_gemini_key()
+ROUTER_URL = get_router_url()
+ROUTER_API_KEY = get_router_key()
 
-def buat_token(nama: str) -> str:
-    return jwt.encode(
-        {"sub": nama, "exp": datetime.utcnow() + timedelta(hours=24)},
-        RAHASIA_JWT, algorithm="HS256"
+# ---------------------------------------------------------------------------
+# 3. Memory (memory/) — kategori, long_term.json, prompt budget
+# ---------------------------------------------------------------------------
+
+try:
+    from memory import (
+        load_memory,
+        save_memory,
+        update_memory,
+        format_memory_for_prompt,
+        search_memory,
+        save_session_summary,
+        get_memory_categories,
+        set_trim_notifier,
     )
 
+    def _trim_notifier(msg: str) -> None:
+        logger.warning("[MEMORI] %s", msg)
 
-def baca_token(t: str) -> Optional[str]:
+    set_trim_notifier(_trim_notifier)
+except Exception as e:
+    logger.warning("Gagal import memory: %s", e)
+
+    def _dummy_memory(*_a, **_k):
+        return {}
+
+    load_memory = _dummy_memory
+    update_memory = _dummy_memory
+    format_memory_for_prompt = lambda *a, **k: ""
+    search_memory = lambda *a, **k: []
+    save_session_summary = lambda *a, **k: None
+    get_memory_categories = lambda: {}
+
+# ---------------------------------------------------------------------------
+# 4. Action discovery (actions/) — berbasis Model Mark-LV
+# ---------------------------------------------------------------------------
+
+from actions import discover_actions
+
+_actions_dir = BASE_DIR / "actions"
+_action_registry = discover_actions(_actions_dir, reserved_names={"open_app", "close_app", "ambil_layar", "kirim_notifikasi", "system_status"})
+
+def run_action(name: str, parameters: dict, ctx: dict | None = None) -> dict:
     try:
-        return jwt.decode(t, RAHASIA_JWT, ["HS256"]).get("sub")
-    except Exception:
-        return None
+        raw = _action_registry.run(name, parameters, ctx)
+        # Action harus mengembalikan dict; fallback jika string
+        if isinstance(raw, dict):
+            return raw
+        return {"ok": True if raw and "Selesai" in str(raw) else False, "pesan": str(raw)}
+    except Exception as e:
+        logger.error("Gagal menjalankan action '%s': %s", name, e)
+        return {"ok": False, "pesan": f"Gagal menjalankan {name}: {e}"}
 
+# ---------------------------------------------------------------------------
+# 5. Plugin discovery (plugins/) — berbasis Model Mark-LV
+# ---------------------------------------------------------------------------
 
-# ─────────────────────────────────────────────────────────────
-#  📱 KENDALI PERANGKAT — ULTRON
-# ─────────────────────────────────────────────────────────────
+from plugins import discover_plugins
+
+_plugins_dir = BASE_DIR / "plugins"
+_plugin_registry = discover_plugins(_plugins_dir, core_tool_names=_action_registry.names())
+
+def run_plugin(name: str, parameters: dict, ctx: dict | None = None) -> str:
+    try:
+        return _plugin_registry.run(name, parameters, ctx)
+    except Exception as e:
+        logger.error("Gagal menjalankan plugin '%s': %s", name, e)
+        return f"Plugin {name} gagal: {e}"
+
+# ---------------------------------------------------------------------------
+# 6. Kontrol perangkat — wrapper terenkripsi di atas Termux:API / ADB
+# ---------------------------------------------------------------------------
+
 class KendaliPerangkat:
-    """
-    ULTRON: Tangan & mata sistem.
-    Buka/tutup aplikasi, ambil layar, kirim notifikasi.
-    """
-
     def __init__(self):
-        self.mode = KENDALI
-        self.tersedia = self._cek_koneksi()
-        self.aplikasi = dict(APLIKASI_DAFTAR)
+        self.mode = MODE_KENDALI
+        self.tersedia = self._cek_tersedia()
+        self.aplikasi = {
+            "whatsapp": "com.whatsapp",
+            "telegram": "org.telegram.messenger",
+            "youtube": "com.google.android.youtube",
+            "pengaturan": "com.android.settings",
+            "kamera": "com.android.camera",
+            "galeri": "com.android.gallery3d",
+            "kalkulator": "com.android.calculator2",
+        }
+        self.screenshot_dir = os.path.expanduser("~/jabrig")
 
-    def _cek_koneksi(self) -> bool:
-        if self.mode == "TIDAK_AKTIF":
+    def _cek_tersedia(self) -> bool:
+        if self.mode == "tidak_aktif":
             return False
-        if self.mode == "TERMUX_API":
+        if self.mode == "termux_api":
             try:
-                r = subprocess.run(
-                    ["termux-notification", "--title", "tes"],
-                    capture_output=True, timeout=3
-                )
+                r = subprocess.run(["termux-notification", "--help"], capture_output=True, timeout=3)
                 return r.returncode == 0
             except Exception:
                 return False
-        if self.mode == "ADB":
+        if self.mode == "adb":
             try:
-                r = subprocess.run(
-                    ["adb", "devices"], capture_output=True,
-                    text=True, timeout=5
-                )
+                r = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=5)
                 return "device" in r.stdout
             except Exception:
                 return False
         return False
 
-    def _cari_paket(self, nama: str) -> Optional[str]:
-        t = nama.strip().lower()
-        if t in self.aplikasi:
-            return self.aplikasi[t]
-        for k, v in self.aplikasi.items():
-            if k in t or t in k:
-                return v
-        return None
-
-    def buka_aplikasi(self, nama: str) -> Dict:
-        paket = self._cari_paket(nama)
+    def buka_aplikasi(self, nama: str) -> dict:
+        paket = self.aplikasi.get(nama.lower())
         if not paket:
-            return {
-                "ok": False,
-                "pesan": f"Aplikasi '{nama}' tidak terdaftar",
-                "pengeksekusi": "ULTRON",
-            }
-        if self.mode == "TERMUX_API":
+            return {"ok": False, "pesan": f"Aplikasi '{nama}' tidak terdaftar"}
+
+        if self.mode == "termux_api":
+            try:
+                subprocess.run(["termux-open-url", f"{nama}://"], capture_output=True)
+                return {"ok": True, "pesan": f"Membuka {nama} ✅", "jalur": "Termux:API"}
+            except Exception as e:
+                return {"ok": False, "pesan": f"Gagal: {e}"}
+        if self.mode == "adb":
             try:
                 subprocess.run(
-                    ["termux-open-url", f"{nama.strip().lower()}://"],
-                    capture_output=True, timeout=5
+                    ["adb", "shell", "am", "start", "-n", f"{paket}/{paket}.MainActivity"],
+                    capture_output=True,
                 )
-                return {
-                    "ok": True,
-                    "pesan": f"✅ Membuka {nama}",
-                    "detail": f"Via Termux:API — skema {nama.strip().lower()}://",
-                    "pengeksekusi": "ULTRON",
-                }
+                return {"ok": True, "pesan": f"Membuka {nama} ✅", "jalur": "ADB"}
             except Exception as e:
-                return {
-                    "ok": False,
-                    "pesan": f"❌ Gagal: {str(e)}",
-                    "pengeksekusi": "ULTRON",
-                }
-        if self.mode == "ADB":
-            try:
-                subprocess.run(
-                    [
-                        "adb", "shell", "am", "start",
-                        "-n", f"{paket}/{paket}.MainActivity",
-                    ],
-                    capture_output=True, timeout=5
-                )
-                return {
-                    "ok": True,
-                    "pesan": f"✅ Membuka {nama}",
-                    "detail": f"Via ADB — paket {paket}",
-                    "pengeksekusi": "ULTRON",
-                }
-            except Exception as e:
-                return {
-                    "ok": False,
-                    "pesan": f"❌ Gagal: {str(e)}",
-                    "pengeksekusi": "ULTRON",
-                }
-        return {
-            "ok": False,
-            "pesan": "❌ Kendali perangkat tidak diaktifkan",
-            "pengeksekusi": "ULTRON",
-        }
+                return {"ok": False, "pesan": f"Gagal: {e}"}
+        return {"ok": False, "pesan": "Kendali perangkat tidak diaktifkan"}
 
-    def tutup_aplikasi(self, nama: str) -> Dict:
-        paket = self._cari_paket(nama)
+    def tutup_aplikasi(self, nama: str) -> dict:
+        paket = self.aplikasi.get(nama.lower())
         if not paket:
-            return {
-                "ok": False,
-                "pesan": f"Aplikasi '{nama}' tidak terdaftar",
-                "pengeksekusi": "ULTRON",
-            }
+            return {"ok": False, "pesan": f"Aplikasi '{nama}' tidak terdaftar"}
         try:
-            if self.mode == "TERMUX_API":
-                subprocess.run(
-                    ["am", "force-stop", paket],
-                    capture_output=True, timeout=5
-                )
-            elif self.mode == "ADB":
-                subprocess.run(
-                    ["adb", "shell", "am", "force-stop", paket],
-                    capture_output=True, timeout=5
-                )
+            perintah = ["am", "force-stop", paket] if self.mode == "termux_api" else ["adb", "shell", "am", "force-stop", paket]
+            subprocess.run(perintah, capture_output=True)
+            return {"ok": True, "pesan": f"Menutup {nama} ✅"}
+        except Exception as e:
+            return {"ok": False, "pesan": f"Gagal: {e}"}
+
+    def ambil_layar(self) -> dict:
+        if self.mode == "tidak_aktif":
+            return {"ok": False, "pesan": "Kendali perangkat tidak diaktifkan"}
+        os.makedirs(self.screenshot_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        jalur = os.path.join(self.screenshot_dir, f"jabrig_layar_{ts}.png")
+        try:
+            if self.mode == "termux_api":
+                subprocess.run(["termux-screenshot", "-o", jalur], capture_output=True)
             else:
-                return {
-                    "ok": False,
-                    "pesan": "❌ Kendali tidak diaktifkan",
-                    "pengeksekusi": "ULTRON",
-                }
-            return {
-                "ok": True,
-                "pesan": f"✅ Menutup {nama}",
-                "pengeksekusi": "ULTRON",
-            }
+                subprocess.run(["adb", "shell", "screencap", "-p", "/sdcard/jabrig_layar.png"], capture_output=True)
+                subprocess.run(["adb", "pull", "/sdcard/jabrig_layar.png", jalur], capture_output=True)
+            if os.path.exists(jalur):
+                return {"ok": True, "pesan": "Tangkapan layar disimpan ✅", "berkas": jalur}
+            return {"ok": False, "pesan": "Perintah berhasil tetapi berkas tidak ditemukan"}
         except Exception as e:
-            return {
-                "ok": False,
-                "pesan": f"❌ Gagal: {str(e)}",
-                "pengeksekusi": "ULTRON",
-            }
+            return {"ok": False, "pesan": f"Gagal: {e}"}
 
-    def ambil_layar(self) -> Dict:
-        if self.mode == "TIDAK_AKTIF":
-            return {
-                "ok": False,
-                "pesan": "❌ Kendali tidak diaktifkan",
-                "pengeksekusi": "ULTRON",
-            }
-        try:
-            jalur = os.path.expanduser("~/jabrig_layar.png")
-            if self.mode == "TERMUX_API":
-                subprocess.run(
-                    ["termux-screenshot", "-o", jalur],
-                    capture_output=True, timeout=10
-                )
-            else:  # ADB
-                tmp = "/sdcard/jabrig_layar.png"
-                subprocess.run(
-                    ["adb", "shell", "screencap", "-p", tmp],
-                    capture_output=True, timeout=10
-                )
-                subprocess.run(
-                    ["adb", "pull", tmp, jalur],
-                    capture_output=True, timeout=10
-                )
-                subprocess.run(
-                    ["adb", "shell", "rm", "-f", tmp],
-                    capture_output=True, timeout=5
-                )
-            return {
-                "ok": True,
-                "pesan": f"✅ Tangkapan layar disimpan",
-                "berkas": jalur,
-                "pengeksekusi": "ULTRON",
-            }
-        except Exception as e:
-            return {
-                "ok": False,
-                "pesan": f"❌ Gagal: {str(e)}",
-                "pengeksekusi": "ULTRON",
-            }
-
-    def kirim_notifikasi(self, judul: str, isi: str) -> Dict:
-        if self.mode != "TERMUX_API":
-            return {
-                "ok": False,
-                "pesan": "❌ Notifikasi hanya tersedia lewat Termux:API",
-                "pengeksekusi": "ULTRON",
-            }
+    def kirim_notifikasi(self, judul: str, isi: str) -> dict:
+        if self.mode != "termux_api":
+            return {"ok": False, "pesan": "Notifikasi hanya tersedia lewat Termux:API"}
         try:
             subprocess.run(
-                [
-                    "termux-notification",
-                    "--title", judul,
-                    "--content", isi,
-                ],
-                capture_output=True, timeout=5
+                ["termux-notification", "--title", judul, "--content", isi],
+                capture_output=True,
             )
-            return {
-                "ok": True,
-                "pesan": f"✅ Notifikasi dikirim: {judul}",
-                "pengeksekusi": "ULTRON",
-            }
+            return {"ok": True, "pesan": "Notifikasi dikirim ✅"}
         except Exception as e:
-            return {
-                "ok": False,
-                "pesan": f"❌ Gagal: {str(e)}",
-                "pengeksekusi": "ULTRON",
-            }
-
-    def daftar_aplikasi(self) -> List[str]:
-        return list(self.aplikasi.keys())
+            return {"ok": False, "pesan": f"Gagal: {e}"}
 
 
 hp = KendaliPerangkat()
 
-# ─────────────────────────────────────────────────────────────
-#  🧠 BRAHMA AI — INGATAN & PEMAHAMAN
-# ─────────────────────────────────────────────────────────────
-class BrahmanAI:
-    """
-    BRAHMA AI: Ingatan & Pemahaman.
-    Menyimpan percakapan, membaca konteks, mempersiapkan
-    konteks untuk respons AI yang lebih baik.
-    """
+# ---------------------------------------------------------------------------
+# 7. HERMES — pengarah lalu lintas
+# ---------------------------------------------------------------------------
 
+class HermesRouter:
     def __init__(self):
-        self.indeks: Dict[str, List[Dict]] = {}  # id_session -> list pesan
-        self.daftar_session: List[str] = []
-        self.session_aktif: str = self._buat_session("utama")
-
-    def _buat_session(self, label: str = "utama") -> str:
-        sid = secrets.token_urlsafe(8)
-        self.indeks[sid] = []
-        self.daftar_session.append(sid)
-        return sid
-
-    def simpan(self, peran: str, isi: str, metadata: Optional[Dict] = None) -> Dict:
-        """Simpan satu pesan ke session aktif."""
-        catatan = {
-            "id": str(uuid.uuid4())[:8],
-            "timestamp": datetime.utcnow().isoformat(),
-            "peran": peran,      # 'user' / 'assistant' / 'system'
-            "isi": isi,
-            "sumber": metadata.get("sumber", "") if metadata else "",
-            "jalur": metadata.get("jalur", "") if metadata else "",
-        }
-        self.indeks[self.session_aktif].append(catatan)
-        return {"session": self.session_aktif, "catatan": catatan}
-
-    def dapat_konteks(self, limit: int = 8) -> List[Dict]:
-        """Kembalikan riwayat terbaru dari session aktif."""
-        if self.session_aktif not in self.indeks:
-            return []
-        pesan = self.indeks[self.session_aktif][-limit:]
-        return pesan
-
-    def katabuka(self) -> str:
-        """Ringkasan singkat session aktif untuk prompt AI."""
-        pesan = self.dapat_konteks(limit=4)
-        if not pesan:
-            return "Belum ada percakapan sebelumnya."
-        baris = []
-        for p in pesan[-4:]:
-            peran = p["peran"].upper()
-            isi_pesan = p["isi"]
-            baris.append(f"[{peran}] {isi_pesan}")
-        return "\n".join(baris)
-
-    def alih_session(self, sid: str) -> bool:
-        if sid in self.indeks:
-            self.session_aktif = sid
-            return True
-        return False
-
-    def daftar_session(self) -> List[Dict]:
-        return [
-            {"id": sid, "jumlah": len(self.indeks.get(sid, []))}
-            for sid in self.daftar_session
-        ]
-
-    def hapus_session(self, sid: str) -> bool:
-        if sid in self.indeks:
-            del self.indeks[sid]
-            self.daftar_session.remove(sid)
-            if self.session_aktif == sid:
-                self.session_aktif = self._buat_session("utama")
-            return True
-        return False
-
-    def simpan_hasil(self, pesan_user: str, hasil_ai: Dict) -> None:
-        """BRAHMA menyimpan hasil akhir percakapan."""
-        self.simpan("user", pesan_user)
-        teks = hasil_ai.get("jawab", "") or hasil_ai.get("pesan", "")
-        konteks_AI = {
-            "sumber":    hasil_ai.get("sumber", ""),
-            "jalur":     hasil_ai.get("jalur", ""),
-            "pengeksekusi": hasil_ai.get("pengeksekusi", ""),
-        }
-        self.simpan("assistant", teks, konteks_AI)
-
-
-brahma = BrahmanAI()
-
-# ─────────────────────────────────────────────────────────────
-#  🤖 JARVIS — Wajah & Sambutan
-# ─────────────────────────────────────────────────────────────
-class Jarvis:
-    """
-    JARVIS: Wajah ramah. Sambutan, perkenalan, bimbingan.
-    """
-
-    def __init__(self):
-        self.pemicu = [
-            "halo", "hai", "selamat", "pagi", "siang", "sore", "malam",
-            "perkenalkan", "bantu", "help", "help me", "tolong",
-            "siapa kamu", "apa kabar", "hai jabrig",
-        ]
-
-    def cocok(self, pesan: str) -> bool:
-        t = pesan.strip().lower()
-        return any(kata in t for kata in self.pemicu)
-
-    def respons(self, pesan: str) -> Dict:
-        waktu = datetime.utcnow().strftime("%H:%M")
-        salam = (
-            "Selamat pagi" if 5 <= datetime.utcnow().hour < 12
-            else "Selamat siang" if 12 <= datetime.utcnow().hour < 15
-            else "Selamat sore" if 15 <= datetime.utcnow().hour < 18
-            else "Selamat malam"
-        )
-
-        perkenalan = (
-            "Halo! Saya Jabrig, asisten kecerdasan terpadu Anda.\n\n"
-            "Ada ULTRON untuk kendali perangkat dan BRAHMA AI\n"
-            "untuk ingatan serta pemahaman. Saya siap membantu Anda."
-        )
-
-        return {
-            "sumber": "JARVIS",
-            "jalur":  "JARVIS",
-            "jawab": (
-                f"👋 {salam}! ({waktu})\n\n"
-                f"{perkenalan}\n\n"
-                f"Contoh perintah:\n"
-                f"  •  buka youtube\n"
-                f"  •  tutup whatsapp\n"
-                f"  •  ambil layar\n"
-                f"  •  notifikasi Halo Dunia\n"
-                f"  •  status\n"
-                f"  •  siapa kamu"
-            ),
+        self.kata_kunci = {
+            "jabari": ["halo", "hai", "selamat", "pagi", "siang", "sore", "malam", "assalamualaikum", "asalamualaikum"],
+            "ultron": [
+                "buka", "tutup", "matikan", "hapus", "jalankan", "nyalakan",
+                "ambil layar", "tangkapan layar", "screenshot", "notifikasi",
+                "status sistem", "cek sistem", "status", "cek",
+                "notif", "kirim pesan", "beri tahu",
+            ],
+            "brahma": ["ingat", "simpan", "hapus ingatan", "apakah kamu tahu", "apa yang kamu tahu", "kontext"],
+            "jev": ["jev", "supervisor", "anjuran", "kurasi", "aman", "selamat"],
         }
 
+    def arahkan(self, teks: str) -> dict:
+        t = teks.lower().strip()
+        if any(k in t for k in self.kata_kunci["jabari"]):
+            return {"tujuan": "JARVIS", "pesan": teks}
+        if any(k in t for k in self.kata_kunci["ultron"]):
+            return {"tujuan": "ULTRON", "pesan": teks}
+        if any(k in t for k in self.kata_kunci["brahma"]):
+            return {"tujuan": "BRAHMA", "pesan": teks}
+        if any(k in t for k in self.kata_kunci["jev"]):
+            return {"tujuan": "JEV", "pesan": teks}
+        return {"tujuan": "GEMINI", "pesan": teks}
 
-jarvis = Jarvis()
 
-# ─────────────────────────────────────────────────────────────
-#  ⚙️ ULTRON — Kontrol Perangkat (telah terdefinisi di atas)
-# ─────────────────────────────────────────────────────────────
-# Kelas KendaliPerangkat berperan sebagai ULTRON
+hermes = HermesRouter()
 
-class UltronAPI:
-    """
-    Pembungkus ULTRON yang menyesuaikan respons menjadi
-    bentuk standar yang diharapkan HERMES.
-    """
+# ---------------------------------------------------------------------------
+# 8. JEV Supervisor — opsional, fail-open (TypeSafe System One)
+# ---------------------------------------------------------------------------
 
+class JevSupervisor:
     def __init__(self):
-        self.hp = hp
+        self.active = False
+        self.api_base = os.getenv("JEV_API_BASE", "https://api.typesafe.ai/v1/systemone")
+        self.api_key = os.getenv("JEV_API_KEY", "")
+        self.timeout = 2.0
 
-    def cocok(self, pesan: str) -> bool:
-        t = pesan.strip().lower()
-        kata_kunci = [
-            "buka", "tutup", "tutupkan", "matikan",
-            "ambil layar", "tangkapan", "screenshot", "foto layar",
-            "notifikasi", "kirim pesan", "beri tahu",
-            "status", "cek sistem", "cek", "lihat sistem",
-        ]
-        return any(k in t for k in kata_kunci)
+    async def cek_kesiapan(self) -> bool:
+        if not self.api_key:
+            return False
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.get(
+                    f"{self.api_base}/status",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                self.active = r.status_code == 200
+                return self.active
+        except Exception as e:
+            logger.warning("[JEV] Gagal cek kesiapan: %s", e)
+            self.active = False
+            return False
 
-    def eksekusi(self, pesan: str) -> Dict:
-        t = pesan.strip().lower()
-        # notifikasi
-        if any(k in t for k in ["notifikasi", "kirim pesan", "beri tahu"]):
-            isi = re.sub(
-                r"(notifikasi|kirim pesan|beri tahu)\s*",
-                "", pesan, flags=re.IGNORECASE
-            ).strip()
-            judul = "JABRIG"
-            isi_final = isi or "Pesan dari JABRIG ✅"
-            hasil = self.hp.kirim_notifikasi(judul, isi_final)
-            return {
-                "sumber": "ULTRON",
-                "jalur":  "ULTRON",
-                "jawab":  hasil["pesan"],
-                **{k: v for k, v in hasil.items() if k not in ["ok", "pesan"]},
-            }
-        # status
-        if any(k in t for k in ["status", "cek sistem", "cek", "lihat sistem"]):
-            return {
-                "sumber": "ULTRON",
-                "jalur":  "ULTRON",
-                "jawab":  self._status_teks(),
-            }
-        # buka
-        if "buka" in t:
-            for nama in self.hp.daftar_aplikasi():
-                if nama in t:
-                    hasil = self.hp.buka_aplikasi(nama)
+    async def kurasi(self, pesan: str, konteks: dict | None = None) -> dict:
+        if not self.active:
+            return {"boleh": True, "hint": "", "catatan": "JEV tidak aktif — lanjut ke AI utama"}
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(
+                    f"{self.api_base}/v1/evaluate",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "message": pesan,
+                        "context": konteks or {},
+                        "saran": True,
+                    },
+                )
+                if r.status_code == 200:
+                    data = r.json()
                     return {
-                        "sumber": "ULTRON",
-                        "jalur":  "ULTRON",
-                        "jawab":  hasil["pesan"],
-                        "ok":     hasil["ok"],
+                        "boleh": data.get("boleh", True),
+                        "hint": data.get("hint", ""),
+                        "catatan": data.get("catatan", ""),
                     }
-        # tutup
-        if any(k in t for k in ["tutup", "tutupkan", "matikan"]):
-            for nama in self.hp.daftar_aplikasi():
-                if nama in t:
-                    hasil = self.hp.tutup_aplikasi(nama)
-                    return {
-                        "sumber": "ULTRON",
-                        "jalur":  "ULTRON",
-                        "jawab":  hasil["pesan"],
-                        "ok":     hasil["ok"],
-                    }
-        # layar
-        if any(k in t for k in ["layar", "tangkapan", "screenshot", "foto layar"]):
-            hasil = self.hp.ambil_layar()
-            return {
-                "sumber": "ULTRON",
-                "jalur":  "ULTRON",
-                "jawab":  hasil["pesan"],
-                "berkas": hasil.get("berkas"),
-                "ok":     hasil["ok"],
-            }
-        return {
-            "sumber": "ULTRON",
-            "jalur":  "ULTRON",
-            "jawab":  "❌ Perintah perangkat tidak dikenali",
-        }
-
-    def _status_teks(self) -> str:
-        baris = [
-            "📊 STATUS SISTEM ULTRON",
-            "",
-            f"  Perangkat : {MODE}",
-            f"  Kendali   : {KENDALI} "
-            f"({'✅ aktif' if hp.tersedia else '⚠️ tidak aktif'})",
-            f"  AI        : Gemini (utama) → 9Router (cadangan)",
-            "",
-            "  Aplikasi yang dikenali:",
-        ]
-        for a in hp.daftar_aplikasi():
-            baris.append(f"    • {a}")
-        if hp.tersedia:
-            baris.append("")
-            baris.append("  ULTRON siap menerima perintah.")
-        else:
-            baris.append("")
-            baris.append("  ULTRON: Kendali perangkat tidak diaktifkan.")
-        return "\n".join(baris)
+                return {"boleh": True, "hint": "", "catatan": "JEV tidak merespons — lanjut ke AI utama"}
+        except Exception as e:
+            logger.warning("[JEV] Gagal kurasi: %s", e)
+            return {"boleh": True, "hint": "", "catatan": f"JEV error: {e}"}
 
 
-ultron = UltronAPI()
+jev = JevSupervisor()
+_logger_jev = logger.getChild("jev")
 
-# ─────────────────────────────────────────────────────────────
-#  🧭 HERMES — Pengelola Alur
-# ─────────────────────────────────────────────────────────────
-class HermesPengarah:
-    """
-    HERMES: Pengarah lalu lintas.
-    Terima pesan → tentukan ke inti mana → eksekusi → BRAHMA simpan.
-    """
+# ---------------------------------------------------------------------------
+# 9. AI Client — Gemini utama → 9Router cadangan
+# ---------------------------------------------------------------------------
 
+class AIEngine:
     def __init__(self):
-        self.jarvis = jarvis
-        self.ultron = ultron
-        self.brahma = brahma
-        self.ai = None  # akan di-set setelah PengelolaAI dibuat
+        self.gemini_key = GEMINI_API_KEY
+        self.gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        self.router_url = ROUTER_URL
+        self.router_key = ROUTER_API_KEY
+        self.status_gemini = bool(self.gemini_key)
+        self.status_router = bool(self.router_key)
+        self._client: Optional[Any] = None
 
-    def set_ai(self, ai):
-        self.ai = ai
+    def _get_client(self):
+        if self._client is None:
+            import httpx
+            self._client = httpx.AsyncClient(timeout=2.0)
+        return self._client
 
-    def arahkan(self, pesan: str) -> Dict:
-        """
-        Menganalisis pesan dan memilih inti yang sesuai.
-        Urutan prioritas:
-          1. Auto skip: jika pesan jelas milik JARVIS/ULTRON,
-             Jev langsung dilewati (lebih cepat).
-          2. (Opsional) Jev non-blocking hint & safety gate
-             jalan di background, tidak memblokir respons.
-          3. JARVIS / ULTRON / GEMINI·9Router决定 akhir.
-        Setelah jawaban diterima, BRAHMA mencatatnya.
-        """
-
-        t = pesan.strip().lower()
-
-        # --- Auto skip: pesan jelas tidak perlu Jev ----------------
-        jelas_jarvis = (
-            self.jarvis.cocok(pesan)
-            and not any(
-                k in t
-                for k in [
-                    "buka", "tutup", "notifikasi", "layar",
-                    "tangkapan", "screenshot", "status", "cek",
-                ]
-            )
-        )
-        jelas_ultron = self.ultron.cocok(pesan)
-
-        if jelas_jarvis or jelas_ultron:
-            # Jev dilewati sama sekali — respons lebih cepat
-            pass
-        else:
-            # Pesan ambigu → fire Jev hint di background tanpa tunggu
-            async def _jev_hint_bg():
-                try:
-                    hint = await jev.beri_hint_ruang(pesan)
-                    if hint:
-                        self.brahma.simpan(
-                            "system",
-                            f"[JEV hint bg] rek={hint.get('rekomendasi')}",
-                            {"sumber": "JEV", "jalur": "JEV_HINT_BG"},
-                        )
-                except Exception:
-                    pass
+    async def tutup(self):
+        if self._client:
             try:
-                loop = asyncio.get_event_loop_policy().get_event_loop()
-                loop.run_in_executor(None, lambda: asyncio.run(_jev_hint_bg()))
+                await self._client.aclose()
             except Exception:
                 pass
-
-        # --- JARVIS --------------------------------------------------
-        if self.jarvis.cocok(pesan) and not any(
-            k in t for k in [
-                "buka", "tutup", "notifikasi", "layar",
-                "tangkapan", "screenshot", "status", "cek",
-            ]
-        ):
-            hasil = self.jarvis.respons(pesan)
-            self.brahma.simpan_hasil(pesan, hasil)
-            return hasil
-
-        # --- ULTRON --------------------------------------------------
-        if self.ultron.cocok(pesan):
-            # Safety gate Jev jalan paralel (fire‑and‑forget),
-            # tidak blocking eksekusi perintah
-            async def _jev_safety_bg():
-                try:
-                    safety = await jev.safety_check(pesan, {
-                        "mode_kendali": KENDALI,
-                        "aplikasi_terdaftar": hp.daftar_aplikasi(),
-                    })
-                    if safety and safety.get("aman") is False:
-                        self.brahma.simpan(
-                            "system",
-                            f"[JEV safety bg] risiko={safety.get('tingkat_risiko')}",
-                            {"sumber": "JEV", "jalur": "JEV_SAFETY_BG"},
-                        )
-                except Exception:
-                    pass
-            try:
-                loop = asyncio.get_event_loop_policy().get_event_loop()
-                loop.run_in_executor(None, lambda: asyncio.run(_jev_safety_bg()))
-            except Exception:
-                pass
-            hasil = self.ultron.eksekusi(pesan)
-            self.brahma.simpan_hasil(pesan, hasil)
-            return hasil
-
-        # --- GEMINI / 9ROUTER ----------------------------------------
-        if self.ai is not None:
-            hasil = asyncio.run(self.ai.tanya(pesan))
-            self.brahma.simpan_hasil(pesan, hasil)
-            return hasil
-
-        # fallback
-        fallback = {
-            "sumber": "SYSTEM",
-            "jalur":  "FALLBACK_LOKAL",
-            "jawab":  (
-                "Diterima: " + pesan + "\n\n"
-                "⚠️  Sistem AI belum siap.\n"
-                "   Isi GEMINI_API_KEY atau hubungkan 9Router."
-            ),
-        }
-        self.brahma.simpan_hasil(pesan, fallback)
-        return fallback
-
-
-# ─────────────────────────────────────────────────────────────
-#  🧭 SUMBER KECERDASAN: GEMINI → 9ROUTER
-# ─────────────────────────────────────────────────────────────
-class PengelolaAI:
-    """
-    Mengirim pertanyaan ke Gemini; jika gagal, mencoba 9Router.
-    Jika keduanya tidak siap, fallback ke respons lokal.
-    """
-
-    def __init__(self):
-        self.sumber: Dict[str, Dict] = {
-            "Gemini": {
-                "url":     "https://generativelanguage.googleapis.com"
-                          "/v1beta/models/gemini-2.0-flash:generateContent",
-                "kunci":   GEMINI_API_KEY,
-                "timeout": 10.0,
-            },
-            "9Router": {
-                "url":     ROUTER_API_URL,
-                "kunci":   ROUTER_API_KEY,
-                "timeout": 15.0,
-            },
-        }
-        self.status: Dict[str, bool] = {}
+            self._client = None
 
     async def cek_sumber(self) -> None:
-        print("\n  🧭 Memeriksa sumber AI …")
-        for nama, cfg in self.sumber.items():
-            siap = bool(cfg["kunci"])
-            if siap and nama == "9Router":
-                try:
-                    async with httpx.AsyncClient(timeout=3.0) as c:
-                        await c.get(
-                            f"{cfg['url']}/status",
-                            headers={
-                                "Authorization": f"Bearer {cfg['kunci']}"
-                            },
-                        )
-                except Exception:
-                    siap = False
-            self.status[nama] = siap
-            ikon = "✅ SIAP" if siap else "⚠️ Tidak diatur"
-            print(f"    {nama:10} → {ikon}")
-        print()
+        logger.info("Memeriksa sumber AI...")
+        if self.gemini_key:
+            try:
+                async with self._get_client() as c:
+                    r = await c.post(
+                        f"{self.gemini_url}?key={self.gemini_key}",
+                        json={"contents": [{"parts": [{"text": "test"}]}]},
+                        timeout=2.0,
+                    )
+                    self.status_gemini = r.status_code == 200
+            except Exception as e:
+                logger.warning("[AI] Gemini tidak siap: %s", e)
+                self.status_gemini = False
+        else:
+            logger.info("[AI] Gemini: tidak ada kunci")
 
-    async def tanya(self, pesan: str) -> Dict:
+        if self.router_key:
+            try:
+                async with self._get_client() as c:
+                    r = await c.get(
+                        f"{self.router_url}/status",
+                        headers={"Authorization": f"Bearer {self.router_key}"},
+                        timeout=2.0,
+                    )
+                    self.status_router = r.status_code == 200
+            except Exception as e:
+                logger.warning("[AI] 9Router tidak siap: %s", e)
+                self.status_router = False
+        else:
+            logger.info("[AI] 9Router: tidak ada kunci")
+
+        logger.info("[AI] Gemini: %s | 9Router: %s",
+                     "SIAP" if self.status_gemini else "TIDAK SIAP",
+                     "SIAP" if self.status_router else "TIDAK SIAP")
+
+    async def tanya(self, pesan: str, konteks: dict | None = None) -> dict:
+        pesan_terenkripsi = self._kanonikasi_pesan(pesan)
         mulai = time.time()
 
-        # Siapkan konteks dari BRAHMA
-        konteks_brahma = brahma.katabuka()
-        prompt = (
-            f"Percakapan sebelumnya:\n{konteks_brahma}\n\n"
-            f"Pesan pengguna:\n{pesan}\n\n"
-            f"Jawab dalam bahasa Indonesia dengan ramah dan jelas."
-        )
-
-        for nama in ["Gemini", "9Router"]:
-            if not self.status.get(nama, False):
-                continue
-            hasil = await self._kirim_ke_ai(nama, prompt)
+        # Coba Gemini
+        if self.status_gemini:
+            hasil = await self._kirim_gemini(pesan_terenkripsi)
             if hasil["sukses"]:
                 return {
-                    "sumber":   nama,
-                    "jawab":    hasil["teks"],
-                    "jalur":    (
-                        "GEMINI_UTAMA" if nama == "Gemini"
-                        else "9ROUTER_CADANGAN"
-                    ),
+                    "sumber": "Gemini",
+                    "teks": hasil["teks"],
+                    "jalur": "GEMINI_UTAMA",
                     "waktu_ms": round((time.time() - mulai) * 1000, 2),
                 }
 
-        # fallback lokal
-        balik = (
-            f"Diterima: {pesan}\n\n"
-            "⚠️  Isi GEMINI_API_KEY atau ROUTER_API_KEY\n"
-            "    untuk jawaban AI yang lengkap.\n\n"
-            "Contoh perintah lokal:\n"
-            "  • 'siapa kamu'      → profil JABRIG\n"
-            "  • 'status'         → status sistem\n"
-            "  • 'buka youtube'   → buka aplikasi\n"
-            "  • 'tutup whatsapp' → tutup aplikasi\n"
-            "  • 'ambil layar'    → tangkapan layar\n"
-            "  • 'notifikasi halo' → kirim notifikasi"
-        )
+        # Coba 9Router
+        if self.status_router:
+            hasil = await self._kirim_router(pesan_terenkripsi)
+            if hasil["sukses"]:
+                return {
+                    "sumber": "9Router",
+                    "teks": hasil["teks"],
+                    "jalur": "9ROUTER_CADANGAN",
+                    "waktu_ms": round((time.time() - mulai) * 1000, 2),
+                }
+
+        # Fallback lokal
         return {
-            "sumber":   "lokal",
-            "jawab":    balik,
-            "jalur":    "CADANGAN_LOKAL",
+            "sumber": "lokal",
+            "teks": (
+                f"Diterima: {pesan}\n\n"
+                "⚠️  Belum ada kunci Gemini atau 9Router yang aktif.\n"
+                "   - Set GEMINI_API_KEY di config/api_keys.json untuk jawaban AI.\n"
+                "   - Atau set ROUTER_API_KEY + ROUTER_URL untuk 9Router cadangan."
+            ),
+            "jalur": "FALLBACK_LOKAL",
             "waktu_ms": round((time.time() - mulai) * 1000, 2),
         }
 
-    async def _kirim_ke_ai(self, nama: str, pesan: str) -> Dict:
-        cfg = self.sumber[nama]
+    def _kanonikasi_pesan(self, teks: str) -> str:
+        return teks.strip()
+
+    async def _kirim_gemini(self, pesan: str) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=cfg["timeout"]) as c:
-                if nama == "Gemini":
-                    resp = await c.post(
-                        f"{cfg['url']}?key={cfg['kunci']}",
-                        json={
-                            "contents": [{
-                                "parts": [{"text": pesan}]
-                            }]
-                        },
-                    )
-                    if resp.status_code == 200:
-                        d = resp.json()
-                        teks = d["candidates"][0]["content"]["parts"][0]["text"]
-                        return {"sukses": True, "teks": teks}
-                    else:
-                        return {
-                            "sukses": False,
-                            "teks":    f"Gemini HTTP {resp.status_code}",
-                        }
-                elif nama == "9Router":
-                    resp = await c.post(
-                        f"{cfg['url']}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {cfg['kunci']}"
-                        },
-                        json={
-                            "model":     "auto",
-                            "messages":  [{"role": "user", "content": pesan}],
-                            "max_tokens": 1024,
-                        },
-                    )
-                    if resp.status_code == 200:
-                        d = resp.json()
-                        teks = d["choices"][0]["message"]["content"]
-                        return {"sukses": True, "teks": teks}
-                    else:
-                        return {
-                            "sukses": False,
-                            "teks":    f"9Router HTTP {resp.status_code}",
-                        }
-        except httpx.TimeoutException:
-            return {"sukses": False, "teks": f"{nama}: waktu habis"}
-        except Exception as e:
-            return {
-                "sukses": False,
-                "teks": f"{nama}: {type(e).__name__}: {str(e)[:40]}",
-            }
-
-
-ai = PengelolaAI()
-
-# ─────────────────────────────────────────────────────────────
-#  🧭 JEV — TYPESAFE SYSTEM ONE (routing & safety supervisor)
-# ─────────────────────────────────────────────────────────────
-# Jev adalah "System One" model dari TypeSafe AI yang memberikan
-# keputusan terstruktur (choice/score/noul) — bukan teks bebas.
-# Digunakan sebagai lapisan supervisi: routing hint, safety gate,
-# dan konteks kurasi. Berjalan di latar belakang (~70-500ms),
-# tidak memblokir eksekusi utama HERMES.
-#
-# Dokumentasi: https://docs.typesafe.ai/api
-# SDK Python: pip install typesafe-sdk
-# Key: TYPESAFE_API_KEY dari console.typesafe.ai
-# ─────────────────────────────────────────────────────────────
-
-
-class JevSupervisor:
-    """
-    Lapisan supervisi berbasis Jev (TypeSafe System One).
-    Memberikan routing hint, safety gate, dan konteks kurasi
-    untuk HERMES — tanpa memblokir eksekusi utama.
-    """
-
-    def __init__(self):
-        self.base_url = os.getenv("JEV_BASE_URL", "https://api.typesafe.ai/v1")
-        self.endpoint_path = os.getenv("JEV_ENDPOINT_PATH", "/systemone")
-        self.api_key_env = os.getenv("JEV_API_KEY_ENV", "TYPESAFE_API_KEY")
-        self.api_key = os.getenv(self.api_key_env, "")
-        self.jev_model = os.getenv("JEV_MODEL", "jev-latest")
-        self.active = bool(self.api_key)
-        # HTTP client reuse (di‑reuse antar panggilan untuk kurangi overhead koneksi)
-        self._client: Optional[httpx.AsyncClient] = None
-        self.last_hint: Optional[Dict] = None
-
-    # ------------------------------------------------------------------
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Ambil HTTP client yang di‑reuse; buat baru kalau belum ada atau sedang tertutup."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=2.0, limits=httpx.Limits(max_connections=1))
-        return self._client
-
-    async def tutup(self) -> None:
-        """Tutup HTTP client (dipanggil saat server shutdown)."""
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
-
-    # ------------------------------------------------------------------
-    async def _evaluasi(self, state: str, pertanyaan: Dict) -> Optional[Dict]:
-        """
-        Panggil POST /v1/systemone ke API Jev.
-        state   : teks atau struktur yang dievaluasi
-        pertanyaan : dict {id: {type, instructions, ...}}
-        Kembalikan dict jawaban jika berhasil, None jika gagal.
-        """
-        if not self.active:
-            return None
-        try:
-            c = await self._get_client()
-            resp = await c.post(
-                f"{self.base_url}{self.endpoint_path}",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model":     self.jev_model,
-                    "state":     state,
-                    "questions": pertanyaan,
-                },
+            c = self._get_client()
+            r = await c.post(
+                f"{self.gemini_url}?key={self.gemini_key}",
+                json={"contents": [{"parts": [{"text": pesan}]}]},
+                timeout=2.0,
             )
-            if resp.status_code == 200:
-                d = resp.json()
-                return d.get("answers", {})
-            else:
-                return None
-        except Exception:
-            return None
-
-    # ------------------------------------------------------------------
-    async def beri_hint_ruang(self, pesan: str) -> Optional[Dict]:
-        """
-        Evaluasi pesan pengguna dan beri routing hint ke HERMES.
-        Hint berisi:
-          - kompleksitas : score 0-1 (0=sederhana, 1=rumit)
-          - rekomendasi   : "jarvis" | "ultron" | "gemini" | "lokal"
-          - perlu_ai      : noul probability (0-1)
-        Hint bersifat advisory — HERMES tetap memutuskan akhir.
-        """
-        pertanyaan = {
-            "kompleksitas": {
-                "type": "score",
-                "instructions": "Seberapa rumit permintaan pengguna?",
-                "criteria": [
-                    "Sangat sederhana, satu kata kunci saja",
-                    "Sedikit konteks, bisa ditangani lokal",
-                    "Membutuhkan pemrosesan sedang",
-                    "Rumit, butuh AI untuk pemahaman mendalam",
-                    "Sangat kompleks,多层推理 diperlukan",
-                ],
-            },
-            "perlu_ai": {
-                "type": "noul",
-                "instructions": "Apakah pesan ini membutuhkan AI (Gemini/9Router)?",
-            },
-            "jenis_perintah": {
-                "type": "choice",
-                "instructions": "Jenis perintah apa yang paling cocok?",
-                "criteria": {
-                    "sambutan":    "Salam, sapa-sapa, perkenalan (JARVIS)",
-                    "kendali":     "Perintah buka/tutup/notifikasi/status (ULTRON)",
-                    "pertanyaan":  "Pertanyaan umum yang butuh AI (Gemini/9Router)",
-                    "tidak_jelas": "Tidak jelas, butuh klarifikasi",
-                },
-            },
-        }
-        hasil = await self._evaluasi(pesan, pertanyaan)
-        if not hasil:
-            return None
-
-        # Parse hasil menjadi hint ringkas
-        kompleksitas_raw = hasil.get("kompleksitas", {})
-        score_val = 0.0
-        if isinstance(kompleksitas_raw, dict):
-            s = kompleksitas_raw.get("score")
-            if isinstance(s, (int, float)):
-                score_val = float(s) / 4.0  # normalize 0-4 → 0-1
-
-        jenis_raw = hasil.get("jenis_perintah", {})
-        rekomendasi = "gemini"
-        if isinstance(jenis_raw, dict):
-            choice_val = jenis_raw.get("choice", "")
-            peta = {
-                "sambutan":   "jarvis",
-                "kendali":    "ultron",
-                "pertanyaan": "gemini",
-                "tidak_jelas":"lokal",
-            }
-            rekomendasi = peta.get(choice_val, "gemini")
-
-        perlu_ai_raw = hasil.get("perlu_ai", {})
-        perlu_ai = 0.5
-        if isinstance(perlu_ai_raw, dict):
-            n = perlu_ai_raw.get("noul")
-            if isinstance(n, (int, float)):
-                perlu_ai = float(n)
-
-        hint = {
-            "sumber":     "JEV",
-            "kompleksitas": round(score_val, 3),
-            "rekomendasi":  rekomendasi,
-            "perlu_ai":     round(perlu_ai, 3),
-            "active":       self.active,
-        }
-        self.last_hint = hint
-        return hint
-
-    # ------------------------------------------------------------------
-    async def safety_check(self, perintah: str, konteks_sistem: Dict) -> Dict:
-        """
-        Safety gate untuk perintah ULTRON.
-        Menentukan apakah perintah aman untuk dieksekusi langsung,
-        perlu konfirmasi, atau ditolak.
-        """
-        state = json.dumps({
-            "perintah": perintah,
-            "mode_kendali": konteks_sistem.get("mode_kendali", "TIDAK_AKTIF"),
-            "aplikasi_terdaftar": konteks_sistem.get("aplikasi_terdaftar", []),
-        }, ensure_ascii=False)
-        pertanyaan = {
-            "aman": {
-                "type": "noul",
-                "instructions": "Apakah perintah ini aman untuk dieksekusi tanpa konfirmasi?",
-            },
-            "tingkat_risiko": {
-                "type": "score",
-                "instructions": "Seberapa tinggi risiko perintah ini?",
-                "criteria": [
-                    "Sangat rendah, aman untuk dieksekusi langsung",
-                    "Rendah, minor risk",
-                    "Sedang, perlu pertimbangan",
-                    "Tinggi, sebaiknya dikonfirmasi dulu",
-                    "Sangat tinggi, berpotensi berbahaya",
-                ],
-            },
-        }
-        hasil = await self._evaluasi(state, pertanyaan)
-        if not hasil:
-            return {"aman": None, "tingkat_risiko": None, "sumber": "JEV (gagal)"}
-
-        aman_raw = hasil.get("aman", {})
-        aman = None
-        if isinstance(aman_raw, dict):
-            n = aman_raw.get("noul")
-            if isinstance(n, (int, float)):
-                aman = float(n) > 0.5
-
-        risiko_raw = hasil.get("tingkat_risiko", {})
-        risiko = 0.0
-        if isinstance(risiko_raw, dict):
-            s = risiko_raw.get("score")
-            if isinstance(s, (int, float)):
-                risiko = float(s) / 4.0
-
-        return {
-            "aman":         aman,
-            "tingkat_risiko": round(risiko, 3),
-            "sumber":       "JEV",
-        }
-
-    # ------------------------------------------------------------------
-    async def kurasi_konteks(self, riwayat: List[Dict]) -> List[Dict]:
-        """
-        Kurasi riwayat percakapan untuk compaction.
-        Masing-masing entri dinilai: keep / truncate / drop.
-        """
-        if not riwayat or not self.active:
-            return riwayat
-
-        state = json.dumps([
-            {
-                "peran":  e.get("peran", ""),
-                "isi":   e.get("isi", "")[:200],
-                "timestamp": e.get("timestamp", ""),
-            }
-            for e in riwayat[-8:]
-        ], ensure_ascii=False)
-
-        pertanyaan = {
-            "pernah_penting": {
-                "type": "noul",
-                "instructions": "Apakah entri ini pernah penting untuk konteks masa depan?",
-            },
-            "bisa_drop": {
-                "type": "noul",
-                "instructions": "Bisakah entri ini dihapus tanpa kehilangan konteks?",
-            },
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as c:
-                resp = await c.post(
-                    f"{self.base_url}{self.endpoint_path}",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model":     self.jev_model,
-                        "state":     state,
-                        "questions": pertanyaan,
-                    },
-                )
-                if resp.status_code != 200:
-                    return riwayat
-                d = resp.json()
-                jawaban = d.get("answers", {})
-        except Exception:
-            return riwayat
-
-        kurasi = []
-        for i, entri in enumerate(riwayat):
-            idx = str(i)
-            pernah_penting = jawaban.get(f"pernah_penting_{idx}", {})
-            bisa_drop = jawaban.get(f"bisa_drop_{idx}", {})
-            pp_val = 0.5
-            bd_val = 0.5
-            if isinstance(pernah_penting, dict):
-                n1 = pernah_penting.get("noul")
-                if isinstance(n1, (int, float)):
-                    pp_val = float(n1)
-            if isinstance(bisa_drop, dict):
-                n2 = bisa_drop.get("noul")
-                if isinstance(n2, (int, float)):
-                    bd_val = float(n2)
-            if pp_val > 0.5 and bd_val < 0.5:
-                entri["jev_kurasi"] = "keep"
-            elif bd_val > 0.5:
-                entri["jev_kurasi"] = "drop"
-            else:
-                entri["jev_kurasi"] = "truncate"
-            kurasi.append(entri)
-
-        return kurasi
-
-
-# Buat instance JevSupervisor (akan aktif jika TYPESAFE_API_KEY di-set)
-jev = JevSupervisor()
-
-# Hubungkan HERMES ke AI
-hermes.set_ai(ai)
-
-import atexit
-
-# Tutup klien HTTP Jev saat proses berakhir
-def _close_jev_client():
-    if "jev" in globals():
-        try:
-            loop = asyncio.get_event_loop_policy().get_event_loop()
-            if loop.is_running():
-                loop.run_until_complete(jev.tutup())
-            else:
-                loop.run_until_complete(jev.tutup())
+            if r.status_code == 200:
+                data = r.json()
+                teks = data["candidates"][0]["content"]["parts"][0]["text"]
+                return {"sukses": True, "teks": teks}
+            logger.warning("[AI] Gemini status: %s", r.status_code)
+            return {"sukses": False}
         except Exception as e:
-            logger.warning(f"Gagal menutup klien JEV: {e}")
+            logger.warning("[AI] Gemini gagal: %s", e)
+            return {"sukses": False}
 
-atexit.register(_close_jev_client)
+    async def _kirim_router(self, pesan: str) -> dict:
+        try:
+            c = self._get_client()
+            r = await c.post(
+                f"{self.router_url}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self.router_key}"},
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": pesan}],
+                    "max_tokens": 1024,
+                },
+                timeout=2.0,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                teks = data["choices"][0]["message"]["content"]
+                return {"sukses": True, "teks": teks}
+            logger.warning("[AI] 9Router status: %s", r.status_code)
+            return {"sukses": False}
+        except Exception as e:
+            logger.warning("[AI] 9Router gagal: %s", e)
+            return {"sukses": False}
 
-# ─────────────────────────────────────────────────────────────
-#  🌐 ANTARMUKA WEB — FASTAPI
-# ─────────────────────────────────────────────────────────────
-app = FastAPI(title="JABRIG v3.0", version="3.0")
+
+ai = AIEngine()
+
+# ---------------------------------------------------------------------------
+# 10. Penonton (REPL / Web UI) — logika inti
+# ---------------------------------------------------------------------------
+
+class JabrigChat:
+    def __init__(self):
+        self.history: list[tuple[str, str]] = []
+
+    def perintah_cepat(self, teks: str) -> Optional[dict]:
+        t = teks.lower().strip()
+
+        # Sapaan
+        if any(k in t for k in ["halo", "hai", "selamat", "pagi", "siang", "sore", "malam"]):
+            return {"jawab": f"Halo! 👋 Saya JABRIG — siap membantu. Ketik pertanyaan atau perintahmu."}
+
+        # Identitas
+        if any(k in t for k in ["siapa kamu", "apa kamu", "jabrig"]):
+            return {
+                "jawab": (
+                    f"Saya JABRIG ⚡\n"
+                    f"• Perangkat: {PERANGKAT}\n"
+                    f"• Mode kendali: {MODE_KENDALI}\n"
+                    f"• AI: Gemini → 9Router\n"
+                    f"• HERMES: aktif\n"
+                    f"• JEV: {'aktif' if jev.active else 'tidak aktif'}"
+                )
+            }
+
+        # Status
+        if any(k in t for k in ["status", "cek sistem"]):
+            s = {
+                "perangkat": PERANGKAT,
+                "mode_kendali": MODE_KENDALI,
+                "kendali_aktif": hp.tersedia,
+                "gemini": ai.status_gemini,
+                "router": ai.status_router,
+                "jev": jev.active,
+            }
+            return {"jawab": "📊 Status Sistem:\n" + "\n".join(f"  • {k}: {v}" for k, v in s.items())}
+
+        # Buka aplikasi
+        for aplikasi in hp.aplikasi:
+            if aplikasi in t and any(k in t for k in ["buka", "jalankan", "nyalakan"]):
+                return run_action("open_app", {"nama": aplikasi})
+
+        # Tutup aplikasi
+        for aplikasi in hp.aplikasi:
+            if aplikasi in t and any(k in t for k in ["tutup", "matikan"]):
+                return run_action("close_app", {"nama": aplikasi})
+
+        # Ambil layar
+        if any(k in t for k in ["ambil layar", "screenshot", "tangkapan layar"]):
+            return run_action("ambil_layar", {})
+
+        # Notifikasi
+        if any(k in t for k in ["notifikasi", "kirim pesan", "beri tahu"]):
+            return run_action("kirim_notifikasi", {"judul": "JABRIG", "isi": "Pesan dari sistem ✅"})
+
+        return None
+
+    async def proses_perintah(self, teks: str) -> dict:
+        # Cek perintah cepat dulu
+        cepat = self.perintah_cepat(teks)
+        if cepat:
+            self.history.append(("user", teks))
+            self.history.append(("system", cepat["jawab"]))
+            return {"sumber": "langsung", "jawab": cepat["jawab"], "jalur": "CEPAT"}
+
+        # HERMES memandu
+        routing = hermes.arahkan(teks)
+        tujuan = routing["tujuan"]
+        pesan = routing["pesan"]
+
+        # JEV supervisor (opsional)
+        jev_hasil = {"boleh": True, "hint": "", "catatan": ""}
+        if tujuan in ("GEMINI", "JEV", "BRAHMA") and teks.strip():
+            jev_hasil = await jev.kurasi(pesan, {"history_len": len(self.history)})
+            _logger_jev.info("[JEV] hasil: %s", jev_hasil)
+
+        if not jev_hasil.get("boleh", True):
+            return {
+                "sumber": "JEV",
+                "jawab": f"⛔ Batal: {jev_hasil.get('catatan', 'Tidak diizinkan oleh JEV')}",
+                "jalur": "JEV_BLOCK",
+            }
+
+        # Tujuan khusus
+        if tujuan == "JARVIS":
+            return await self._jawab_jarvis(pesan)
+        if tujuan == "ULTRON":
+            return await self._jawab_ultron(pesan)
+        if tujuan == "BRAHMA":
+            return await self._jawab_brahma(pesan)
+        if tujuan == "JEV":
+            return await self._jawab_jev(pesan)
+
+        # Default: AI (Gemini → 9Router)
+        memori_teks = format_memory_for_prompt()
+        prompt_lengkap = self._buat_prompt_AI(pesan, memori_teks)
+        return await ai.tanya(prompt_lengkap)
+
+    def _buat_prompt_AI(self, pesan: str, memori: str) -> str:
+        if memori:
+            return f"{memori}\n\nPertanyaan: {pesan}"
+        return pesan
+
+    async def _jawab_jarvis(self, pesan: str) -> dict:
+        return {"sumber": "JARVIS", "jawab": "Halo! Saya JABRIG, siap membantu Anda.", "jalur": "JARVIS"}
+
+    async def _jawab_ultron(self, pesan: str) -> dict:
+        # HERMES sudah menentukan ini perintah perangkat
+        return await self.proses_perintah(pesan)
+
+    async def _jawab_brahma(self, pesan: str) -> dict:
+        # Coba cari di memori
+        kata_kunci = re.sub(r" ingat |simpan |hapus ", "", pesan, flags=re.I).strip()
+        if kata_kunci:
+            hasil = search_memory(kata_kunci)
+            if hasil:
+                return {
+                    "sumber": "BRAHMA",
+                    "jawab": "🧠 Hasil memori:\n" + "\n".join(f"• {r['kategori']}/{r['kunci']}: {r['isi']}" for r in hasil),
+                    "jalur": "BRAHMA_MEMORY",
+                }
+        return {"sumber": "BRAHMA", "jawab": "Tidak ada ingatan yang relevan.", "jalur": "BRAHMA_EMPTY"}
+
+    async def _jawab_jev(self, pesan: str) -> dict:
+        return {
+            "sumber": "JEV",
+            "jawab": f"JEV: {jev_hasil.get('catatan', 'tidak ada saran')}",
+            "jalur": "JEV_Saran",
+        }
+
+    def rangkum_sesi(self) -> str:
+        if not self.history:
+            return ""
+        return " | ".join(f"{a}: {b[:40]}" for a, b in self.history[-20:])
+
+chat = JabrigChat()
+
+# ---------------------------------------------------------------------------
+# 11. FastAPI Web UI
+# ---------------------------------------------------------------------------
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+
+app = FastAPI(title="JABRIG")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1208,367 +641,163 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def log_request(request, call_next):
-    logger.info(f"{request.method} {request.url.path} dari {request.client.host if request.client else '?'}")
-    response = await call_next(request)
-    logger.info(f"→ {response.status_code} {request.url.path}")
-    return response
-
-
 @app.on_event("startup")
-async def startup_event():
-    logger.info("Memeriksa sumber AI …")
+async def startup_event() -> None:
+    logger.info("=== JABRIG Mulai ===")
+    logger.info("Perangkat : %s", PERANGKAT)
+    logger.info("Kendali   : %s (%s)", MODE_KENDALI, "aktif" if hp.tersedia else "tidak aktif")
     await ai.cek_sumber()
-    # Cek ketersediaan JEV
-    logger.info("Memeriksa JEV (TypeSafe System One) …")
-    if jev.active:
-        logger.info(f"    JEV          → ✅ aktif (model: {jev.jev_model})")
-    else:
-        logger.warning("    JEV          → ⚠️  TYPESAFE_API_KEY tidak diatur")
-
-    logger.info("JABRIG siap.")
+    logger.info("HERMES    : aktif")
+    logger.info("JEV       : %s", "aktif" if jev.active else "tidak aktif (fail-open)")
+    logger.info("Web UI    : http://localhost:8000")
+    logger.info("=== JABRIG Siap ===")
 
 
-# ------------------------------------------------------------
-#  GET  /   → halaman utama HTML
-# ------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-def halaman_utama():
-    status_ai_html = ""
-    for nama, siap in ai.status.items():
-        warna = "#00ff9d" if siap else "#ff6b6b"
-        teks  = "✅ SIAP" if siap else "⚠️ TIDAK DIATUR"
-        status_ai_html += (
-            f'<div class="card-ai"><b>{nama}</b> '
-            f'<span style="color:{warna}">{teks}</span></div>'
-        )
-
-    kontrol_teks = (
-        "❌ Tidak Aktif" if KENDALI == "TIDAK_AKTIF" else KENDALI
-    )
-    kontrol_warna = (
-        "#ff6b6b" if KENDALI == "TIDAK_AKTIF" else "#00ff9d"
-    )
-
-    apl = ", ".join(hp.daftar_aplikasi()) if hp.tersedia else "—"
-
+def index():
     return f"""<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Jabrig — Sistem Kecerdasan Terpadu</title>
+<title>JABRIG</title>
 <style>
-:root {{
-  --bg: #03040a;
-  --b:  #4285f4;
-  --e:  #00ff9d;
-  --r:  #ff6b6b;
-  --t:  #e8eaf6;
-  --m:  #7a7f9a;
-  --k:  #1a1d2e;
-}}
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{
-  background: var(--bg);
-  color: var(--t);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 18px 16px 30px;
-  line-height: 1.6;
-  min-height: 100vh;
-}}
-h1 {{
-  background: linear-gradient(90deg, var(--b), var(--e));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  font-size: 1.7rem;
-  margin-bottom: 2px;
-  text-align: center;
-}}
-.subtitle {{
-  text-align: center;
-  color: var(--m);
-  margin-bottom: 18px;
-  font-size: .9rem;
-}}
-.kotak {{
-  background: rgba(255,255,255,.03);
-  border: 1px solid rgba(66,133,244,.18);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 14px;
-}}
-.kotak h3 {{
-  color: var(--e);
-  font-size: 1rem;
-  margin-bottom: 10px;
-  border-bottom: 1px solid rgba(66,133,244,.15);
-  padding-bottom: 6px;
-}}
-.grid-2 {{
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}}
-.grid-3 {{
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}}
-.card {{
-  background: rgba(66,133,244,.07);
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: .9rem;
-}}
-.card b {{ font-size: .95rem; }}
-.card-ai {{
-  background: rgba(0,255,157,.06);
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-size: .9rem;
-}}
-
-textarea {{
-  width: 100%;
-  padding: 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(66,133,244,.3);
-  background: rgba(0,0,0,.35);
-  color: var(--t);
-  font-size: 1rem;
-  resize: vertical;
-  outline: none;
-  transition: border-color .2s;
-  font-family: inherit;
-}}
-textarea:focus {{ border-color: var(--b); }}
-
-button {{
-  background: linear-gradient(90deg, var(--b), var(--e));
-  border: none;
-  padding: 10px 22px;
-  border-radius: 10px;
-  font-weight: 600;
-  font-size: .95rem;
-  cursor: pointer;
-  margin-top: 10px;
-  color: #03040a;
-  letter-spacing: .2px;
-  transition: filter .15s;
-}}
-button:hover {{ filter: brightness(1.1); }}
-
-.hasil {{
-  margin-top: 14px;
-  white-space: pre-wrap;
-  line-height: 1.65;
-  color: var(--t);
-  background: rgba(0,0,0,.25);
-  border-radius: 10px;
-  padding: 12px 14px;
-  min-height: 48px;
-  border: 1px solid rgba(66,133,244,.12);
-  font-size: .95rem;
-}}
-.hasil b {{ color: var(--e); }}
-.hasil .tag {{
-  display: inline-block;
-  background: rgba(66,133,244,.2);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: .75rem;
-  margin-right: 4px;
-  color: var(--b);
-  font-weight: 600;
-}}
-
-.foot {{
-  color: var(--m);
-  font-size: .8rem;
-  margin-top: 22px;
-  text-align: center;
-  border-top: 1px solid rgba(66,133,244,.1);
-  padding-top: 12px;
-}}
-.legend {{
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}}
-.legend span {{
-  font-size: .75rem;
-  background: rgba(255,255,255,.05);
-  border-radius: 4px;
-  padding: 3px 8px;
-  color: var(--m);
-}}
+  html, body {{ background: #02040a; color: #e8eaf6; font-family: system-ui, sans-serif; margin: 0; }}
+  .container {{ max-width: 800px; margin: 40px auto; padding: 0 20px; }}
+  h1 {{ font-size: 2.2rem; background: linear-gradient(90deg, #4285f4, #00ff9d); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.4rem; }}
+  .sub {{ color: #7a7f9a; margin-bottom: 2rem; }}
+  .panel {{ background: #0b0f1c; border: 1px solid #2a3456; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }}
+  .panel h2 {{ font-size: 1rem; color: #9aa0b8; margin: 0 0 1rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }}
+  .stat {{ background: #0f1320; border-radius: 8px; padding: 0.8rem 1rem; }}
+  .stat .label {{ color: #7a7f9a; font-size: 0.8rem; text-transform: uppercase; }}
+  .stat .value {{ color: #e8eaf6; font-size: 1.1rem; font-weight: bold; margin-top: 0.2rem; }}
+  .stat .value.ok {{ color: #00ff9d; }}
+  .stat .value.warn {{ color: #ffbf00; }}
+  .stat .value.bad {{ color: #ff6b6b; }}
+  textarea {{ width: 100%; background: #0b0f1c; color: #e8eaf6; border: 1px solid #2a3456; border-radius: 8px; padding: 1rem; font-size: 1rem; box-sizing: border-box; resize: vertical; }}
+  button {{ background: linear-gradient(90deg, #4285f4, #00ff9d); border: none; border-radius: 8px; padding: 0.8rem 1.5rem; font-size: 1rem; font-weight: bold; color: #02040a; cursor: pointer; margin-top: 0.6rem; }}
+  button:hover {{ opacity: 0.92; }}
+  .output {{ margin-top: 1rem; padding: 1rem; background: #0b0f1c; border-radius: 8px; white-space: pre-wrap; line-height: 1.6; }}
+  .footer {{ text-align: center; color: #7a7f9a; margin-top: 2rem; font-size: 0.85rem; }}
 </style>
 </head>
 <body>
+<div class="container">
+  <h1>⚡ JABRIG</h1>
+  <p class="sub">Sistem Kecerdasan Terpadu • Gemini → 9Router • HERMES • JEV</p>
 
-<h1>⚡ Jabrig</h1>
-<p class="subtitle">Sistem Kecerdasan Terpadu • Gemini → 9Router → JEV  |  v3.0  |  {MODE}</p>
-
-<div class="kotak">
-  <h3>🧭 Status Sistem</h3>
-  <div class="grid-2">
-    <div class="card"><b>Perangkat</b><br>{MODE}</div>
-    <div class="card"><b>Kendali HP</b><br>
-      <span style="color:{kontrol_warna}">{kontrol_teks}</span></div>
+  <div class="panel">
+    <h2>Sistem</h2>
+    <div class="grid">
+      <div class="stat">
+        <div class="label">Perangkat</div>
+        <div class="value ok" id="perangkat">{PERANGKAT}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Mode Kendali</div>
+        <div class="value {"ok" if hp.tersedia else "warn"}" id="mode">{MODE_KENDALI}</div>
+      </div>
+    </div>
+    <div class="grid" style="margin-top:0.8rem">
+      <div class="stat">
+        <div class="label">Gemini</div>
+        <div class="value {"ok" if ai.status_gemini else "bad"}" id="gemini">{"✅ SIAP" if ai.status_gemini else "⚠️ Tidak Aktif"}</div>
+      </div>
+      <div class="stat">
+        <div class="label">9Router</div>
+        <div class="value {"ok" if ai.status_router else "warn"}" id="router">{"✅ SIAP" if ai.status_router else "⚠️ Tidak Aktif"}</div>
+      </div>
+      <div class="stat" style="grid-column: span 2;">
+        <div class="label">HERMES / JEV</div>
+        <div class="value ok">HERMES: aktif • JEV: {"aktif" if jev.active else "tidak aktif (fail-open)"}</div>
+      </div>
+    </div>
   </div>
-  <div style="margin-top:10px">
-    <b style="color:var(--m)">Sumber AI:</b>
-    <div style="margin-top:6px">{status_ai_html}</div>
+
+  <div class="panel">
+    <h2>Kirim Perintah</h2>
+    <textarea id="input" rows="3" placeholder="Contoh: buka youtube / siapa kamu / apakah kamu tahu proyek saya?"></textarea>
+    <br>
+    <button onclick="kirim()">Kirim</button>
+    <div class="output" id="output"></div>
+  </div>
+
+  <div class="footer">
+    JABRIG v3.0 — Gemini → 9Router • HERMES • JEV • tanpa root/ADB
   </div>
 </div>
-
-<div class="kotak">
-  <h3>🤖 Tiga Inti JABRIG</h3>
-  <div class="grid-3">
-    <div class="card"><b>🤖 JARVIS</b><br>Wajah & sup bpmtam<br>Sambutan & bantuan</div>
-    <div class="card"><b>⚙️ ULTRON</b><br>Tangan & mata<br>Kontrol perangkat</div>
-    <div class="card"><b>🧠 BRAHMA AI</b><br>Ingatan & pemahaman<br>Penyimpanan percakapan</div>
-  </div>
-  <div class="legend">
-    <span>[PENGARAH] HERMES</span>
-    <span>[GEMINI 2.0] Utama</span>
-    <span>[9ROUTER] Cadangan</span>
-  </div>
-</div>
-
-<div class="kotak">
-  <h3>💬 Kirim Pesan ke HERMES</h3>
-  <textarea id="p" rows="3"
-    placeholder="Contoh: halo / buka youtube / status / siapa kamu / jelaskan AI"></textarea>
-  <button onclick="kirim()">Kirim →</button>
-  <div id="h" class="hasil"></div>
-</div>
-
-<p class="foot">
-  JABRIG v3.0 — TANPA ROOT — Termux:API / ADB / Web — Gemini → 9Router<br>
-  BRAHMA AI menyimpan setiap percakapan untuk ingatan berikutnya.
-</p>
 
 <script>
 async function kirim() {{
-  var p = document.getElementById('p');
-  var h = document.getElementById('h');
-  var teks = p.value.trim();
-  if (!teks) {{
-    h.innerHTML = '<b>⚠️</b>  Ketik pesan terlebih dahulu.';
-    return;
-  }}
-  h.innerHTML = '<span class="tag">HERMES</span> <b>⏳</b> Memproses …';
+  var input = document.getElementById('input');
+  var output = document.getElementById('output');
+  if (!input.value.trim()) return;
+  output.textContent = "⏳ Memproses...";
   try {{
-    var r = await fetch('/perintah', {{
-      method : 'POST',
+    var res = await fetch('/perintah', {{
+      method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body   : JSON.stringify({{ pesan: teks }})
+      body: JSON.stringify({{ teks: input.value }})
     }});
-    var d = await r.json();
-    var jawab = d.jawab || d.pesan || JSON.stringify(d, null, 2);
-    var src = (d.jalur || d.sumber || '???').toUpperCase().replace(/_/g, ' ');
-    h.innerHTML = '<span class="tag">' + src + '</span><br><br>' + jawab;
+    var data = await res.json();
+    output.textContent = (data.jawab !== undefined ? data.jawab : JSON.stringify(data, null, 2));
+    input.value = '';
   }} catch (e) {{
-    h.innerHTML = '<span class="tag">ERROR</span> <b>❌</b> ' + e.message;
+    output.textContent = 'Gagal terhubung ke JABRIG: ' + e.message;
   }}
 }}
 </script>
-
 </body>
 </html>"""
 
 
-# ------------------------------------------------------------
-#  POST /perintah → pesan ke HERMES, dapat jawaban
-# ------------------------------------------------------------
 @app.post("/perintah")
-async def perintah(data: dict):
-    pesan = (data.get("pesan") or data.get("teks", "")).strip()
-    if not pesan:
-        return JSONResponse(
-            status_code=400,
-            content={"jalur": "ERROR", "pesan": "Harap isi pesan"},
-        )
-
-    hasil = hermes.arahkan(pesan)
-
+async def perintah(payload: dict):
+    teks = payload.get("teks", "").strip()
+    if not teks:
+        raise HTTPException(status_code=400, detail="teks kosong")
+    hasil = await chat.proses_perintah(teks)
+    # Simpan ringkasan sesi tiap 10 pesan
+    if len(chat.history) % 10 == 0:
+        try:
+            chat.rangkum_sesi()
+            save_session_summary(chat.rangkum_sesi())
+        except Exception as e:
+            logger.warning("[MEMORI] Gagal simpan sesi: %s", e)
     return {
-        "jalur":     hasil.get("jalur", ""),
-        "sumber":    hasil.get("sumber", ""),
-        "jawab":     hasil.get("jawab", ""),
-        "pesan":     hasil.get("pesan", ""),
-        "ok":        hasil.get("ok"),
-        "berkas":    hasil.get("berkas"),
-        "detail":    hasil.get("detail"),
+        "jawab": hasil.get("jawab", hasil.get("teks", "")),
+        "jalur": hasil.get("jalur", hasil.get("sumber", "tidak diketahui")),
+        "sumber": hasil.get("sumber", ""),
     }
 
 
-# ------------------------------------------------------------
-#  Endpoint tambahan
-# ------------------------------------------------------------
 @app.get("/status")
-async def status_sistem():
+async def status_endpoints():
     return {
-        "perangkat":    MODE,
-        "kendali":      {
-            "mode":      KENDALI,
-            "tersedia":  hp.tersedia,
-            "aplikasi":  hp.daftar_aplikasi(),
-        },
-        "ai":           {k: {"siap": v} for k, v in ai.status.items()},
-        "session_brahma": {
-            "aktif": brahma.session_aktif,
-            "jumlah_pesan": len(brahma.dapat_konteks(limit=100)),
-            "semua_session": brahma.daftar_session(),
-        },
-        "timestamp":    datetime.utcnow().isoformat(),
+        "perangkat": PERANGKAT,
+        "mode_kendali": MODE_KENDALI,
+        "kendali_aktif": hp.tersedia,
+        "gemini_siap": ai.status_gemini,
+        "router_siap": ai.status_router,
+        "jev_aktif": jev.active,
+        "action_count": len(_action_registry.names()),
+        "plugin_count": len(_plugin_registry._plugins),
+        "memory_categories": list(get_memory_categories().keys()),
     }
 
 
-@app.get("/health")
-async def health():
-    return {"status": "OK", "versi": "3.0"}
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("[AI] Menutup klien...")
+    await ai.tutup()
+    logger.info("=== JABRIG Berhenti ===")
 
 
-@app.get("/brahma/konteks")
-async def brahma_konteks():
-    return {"konteks": brahma.dapat_konteks(limit=8)}
+# ---------------------------------------------------------------------------
+# 12. Jalankan jika dieksekusi langsung
+# ---------------------------------------------------------------------------
 
-
-@app.get("/brahma/session")
-async def brahma_session():
-    return {"sessions": brahma.daftar_session()}
-
-
-# ─────────────────────────────────────────────────────────────
-#  7. JALANKAN SERVER
-# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("\n")
-    print("  ═══════════════════════════════════════════════════")
-    print("    🚀 JABRIG v3.0 — Siap Di Jalankan")
-    print("  ═══════════════════════════════════════════════════")
-    print(f"\n  📱 Perangkat     : {MODE}")
-    print(f"  🎮 Kendali HP    : {KENDALI} "
-          f"{'✅ tersedia' if hp.tersedia else '⚠️ tidak aktif'}")
-    print(f"  🧠 Inti sistem   : JARVIS + ULTRON + BRAHMA AI")
-    print(f"  🧭 Pengarah      : HERMES")
-    print(f"  🌐 Web UI        : http://localhost:8000")
-    print(f"  📡 API status    : http://localhost:8000/status")
-    print(f"  📡 API health    : http://localhost:8000/health")
-    print(f"  📡 Brahma konteks: http://localhost:8000/brahma/konteks")
-    print(f"\n  💡 Tips:")
-    print(f"     • Isi GEMINI_API_KEY untuk jawaban AI Gemini")
-    print(f"     • Isi ROUTER_API_KEY + ROUTER_API_URL untuk 9Router")
-    print(f"     • Di HP, pasang Termux:API dari F-Droid")
-    print(f"\n  ⏹️  Hentikan : tekan Ctrl + C")
-    print("\n")
-    asyncio.run(ai.cek_sumber())
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

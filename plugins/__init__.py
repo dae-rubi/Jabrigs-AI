@@ -1,0 +1,188 @@
+"""
+Plugin discovery, validation, collision detection, and dispatch.
+Berbasis pola Mark-LV, disesuaikan untuk Jabrig.
+"""
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import re
+import sys
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+_DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
+
+_BEHAVIORS = ("BLOCKING", "NON_BLOCKING")
+_SCHEDULING = ("WHEN_IDLE", "SILENT", "INTERRUPT")
+
+
+def _opt_upper(value, allowed: tuple[str, ...]) -> Optional[str]:
+    v = str(value or "").strip().upper()
+    return v if v in allowed else None
+
+
+@dataclass
+class PluginRecord:
+    name: str
+    description: str = ""
+    parameters: dict = field(default_factory=lambda: dict(_DEFAULT_PARAMS))
+    run: Optional[Callable] = None
+    file: str = ""
+    valid: bool = False
+    error: str = ""
+    behavior: Optional[str] = None
+    scheduling: Optional[str] = None
+
+
+class PluginRegistry:
+    def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None]):
+        self._plugins = plugins
+        self._all_records: list[PluginRecord] = []
+        self._logger = logger
+
+    def get_tool_declarations(self) -> list[dict]:
+        out = []
+        for rec in self._plugins.values():
+            decl = {
+                "name": rec.name,
+                "description": rec.description,
+                "parameters": rec.parameters,
+            }
+            if rec.behavior:
+                decl["behavior"] = rec.behavior
+            out.append(decl)
+        return out
+
+    def has(self, name: str) -> bool:
+        return name in self._plugins
+
+    def scheduling(self, name: str) -> Optional[str]:
+        rec = self._plugins.get(name)
+        return rec.scheduling if rec else None
+
+    def list_for_ui(self) -> list[dict]:
+        out = []
+        for rec in self._all_records:
+            out.append({
+                "name": rec.name,
+                "description": rec.description,
+                "file": rec.file,
+                "valid": rec.valid,
+                "error": rec.error,
+            })
+        return out
+
+    def run(self, name: str, parameters: dict, ctx: dict | None = None) -> str:
+        rec = self._plugins.get(name)
+        if rec is None or not rec.valid:
+            return f"Plugin '{name}' tidak tersedia."
+        try:
+            return _call_run(rec.run, parameters, ctx or {}) or "Selesai."
+        except Exception as e:
+            self._logger(f"Plugin '{name}' gagal: {e}")
+            traceback.print_exc()
+            return f"Plugin '{name}' gagal: {e}"
+
+
+def _call_run(run_fn, parameters, ctx):
+    sig = inspect.signature(run_fn)
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    kwargs = {}
+    for key in ("player", "speak", "response", "session_memory"):
+        if has_var_kw or key in sig.parameters:
+            kwargs[key] = ctx.get(key)
+    return run_fn(parameters, **kwargs)
+
+
+def _validate(module, filename: str) -> PluginRecord:
+    plugin_meta = getattr(module, "PLUGIN", None)
+    if not isinstance(plugin_meta, dict):
+        return PluginRecord(name=Path(filename).stem, file=filename,
+                             error="Tidak ada dict PLUGIN di level modul.")
+
+    name = plugin_meta.get("name")
+    if not isinstance(name, str) or not _NAME_RE.match(name):
+        return PluginRecord(name=str(name or Path(filename).stem), file=filename,
+                             error="PLUGIN['name'] tidak ada atau bukan identifier valid.")
+
+    description = plugin_meta.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return PluginRecord(name=name, file=filename,
+                             error="PLUGIN['description'] tidak ada atau kosong.")
+
+    parameters = plugin_meta.get("parameters", _DEFAULT_PARAMS)
+    if not isinstance(parameters, dict) or parameters.get("type") != "OBJECT":
+        return PluginRecord(name=name, file=filename,
+                             error="PLUGIN['parameters'] harus dict dengan 'type': 'OBJECT'.")
+
+    run_fn = getattr(module, "run", None)
+    if not callable(run_fn):
+        return PluginRecord(name=name, file=filename,
+                             error="Tidak ada fungsi run() yang callable.")
+
+    return PluginRecord(
+        name=name,
+        description=description.strip(),
+        parameters=parameters,
+        run=run_fn,
+        file=filename,
+        valid=True,
+        error="",
+        behavior=_opt_upper(plugin_meta.get("behavior"), _BEHAVIORS),
+        scheduling=_opt_upper(plugin_meta.get("scheduling"), _SCHEDULING),
+    )
+
+
+def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
+                      logger: Callable[[str], None] = print) -> PluginRegistry:
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    valid: dict[str, PluginRecord] = {}
+    all_records: list[PluginRecord] = []
+
+    files = sorted(plugins_dir.glob("*.py"), key=lambda p: p.name)
+    for path in files:
+        if path.name.startswith("_"):
+            continue
+        try:
+            module_name = f"plugins.{path.stem}"
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError("tidak bisa membangun import spec")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(module_name, None)
+                raise
+
+            rec = _validate(module, path.name)
+
+            if rec.valid and rec.name in core_tool_names:
+                rec = PluginRecord(name=rec.name, file=path.name,
+                                    error=f"Nama '{rec.name}' bertabrakan dengan tool inti — ditolak.")
+            elif rec.valid and rec.name in valid:
+                other = valid[rec.name].file
+                rec = PluginRecord(name=rec.name, file=path.name,
+                                    error=f"Nama '{rec.name}' sudah dipakai plugin '{other}' — ditolak.")
+
+        except Exception as e:
+            rec = PluginRecord(name=path.stem, file=path.name,
+                                error=f"Gagal memuat: {e}")
+            traceback.print_exc()
+
+        all_records.append(rec)
+        if rec.valid:
+            valid[rec.name] = rec
+            logger(f"Plugin dimuat: {rec.name} ({path.name})")
+        else:
+            logger(f"Plugin ditolak: {path.name} — {rec.error}")
+
+    registry = PluginRegistry(valid, logger)
+    registry._all_records = all_records
+    logger(f"Penemuan plugin selesai: {len(valid)} aktif.")
+    return registry
