@@ -1,0 +1,27 @@
+[Unit]
+Description=JABRIG — Sistem Kecerdasan Terpadu (JARVIS, ULTRON, BRAHMA AI)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+EnvironmentFile=/root/.jabrig-env
+ExecStart=/usr/bin/python3 /root/main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Keamanan: batasi resource (opsional)
+# MemoryMax=512M
+# CPUQuota=100%
+
+# Environment bawaan (jika .jabrig-env tidak diisi)
+Environment=GEMINI_API_KEY=""
+Environment=ROUTER_API_KEY=""
+Environment=TYPESAFE_API_KEY=""
+
+[Install]
+WantedBy=multi-user.target

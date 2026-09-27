@@ -64,28 +64,52 @@ from jose import jwt
 from passlib.context import CryptContext
 
 import uvicorn
+import logging
+import logging.handlers
+
+# ─────────────────────────────────────────────────────────────
+#  Logging
+# ─────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("jabrig")
+
+# Redirect print() yang ada ke logger (opsional — untuk compat dengan print yang ada)
+class _PrintToLogger:
+    def write(self, msg):
+        if msg.strip():
+            logger.info(msg.rstrip("
+"))
+    def flush(self):
+        pass
+
+import sys
+sys.stdout = _PrintToLogger()
+sys.stderr = logging.StreamHandler(sys.stderr)
+
 
 # ─────────────────────────────────────────────────────────────
 #  DETEKSI & KONFIGURASI PLATFORM OTOMATIS
 # ─────────────────────────────────────────────────────────────
-print("\n" + "=" * 64)
-print("  ⚡ JABRIG — SISTEM KECERDASAN TERPADU  v3.0")
-print("=" * 64)
-print()
+logger.info("=" * 64)
+logger.info("  ⚡ JABRIG — SISTEM KECERDASAN TERPADU  v3.0")
+logger.info("=" * 64)
 
 TERMITUS_PREFIX = os.environ.get("PREFIX", "")
 IS_TERMUX = "com.termux" in TERMITUS_PREFIX
 MODE: str = "HP_ANDROID" if IS_TERMUX else "PC"
-print(f"  📱 Perangkat  : {MODE} {' (Termux)' if IS_TERMUX else ' (PC/Laptop)'}")
+logger.info(f"  📱 Perangkat  : {MODE} {' (Termux)' if IS_TERMUX else ' (PC/Laptop)'}")
 
 KENDALI: str = "TERMUX_API" if IS_TERMUX else None
 if not IS_TERMUX:
     jawab = input("  Aktifkan kendali perangkat via ADB? (y/n): ").strip().lower()
     KENDALI = "ADB" if jawab.startswith("y") else "TIDAK_AKTIF"
 
-print(f"  🎮 Kendali    : {KENDALI}")
-print("=" * 64)
-print()
+logger.info(f"  🎮 Kendali    : {KENDALI}")
+logger.info("=" * 64)
 
 # Kunci API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -617,13 +641,50 @@ class HermesPengarah:
         """
         Menganalisis pesan dan memilih inti yang sesuai.
         Urutan prioritas:
-          1. JARVIS — sambutan / sapa / bantuan
-          2. ULTRON — perintah perangkat / status
-          3. GEMINI / 9ROUTER — pertanyaan umum / analisis
+          1. Auto skip: jika pesan jelas milik JARVIS/ULTRON,
+             Jev langsung dilewati (lebih cepat).
+          2. (Opsional) Jev non-blocking hint & safety gate
+             jalan di background, tidak memblokir respons.
+          3. JARVIS / ULTRON / GEMINI·9Router决定 akhir.
         Setelah jawaban diterima, BRAHMA mencatatnya.
         """
 
         t = pesan.strip().lower()
+
+        # --- Auto skip: pesan jelas tidak perlu Jev ----------------
+        jelas_jarvis = (
+            self.jarvis.cocok(pesan)
+            and not any(
+                k in t
+                for k in [
+                    "buka", "tutup", "notifikasi", "layar",
+                    "tangkapan", "screenshot", "status", "cek",
+                ]
+            )
+        )
+        jelas_ultron = self.ultron.cocok(pesan)
+
+        if jelas_jarvis or jelas_ultron:
+            # Jev dilewati sama sekali — respons lebih cepat
+            pass
+        else:
+            # Pesan ambigu → fire Jev hint di background tanpa tunggu
+            async def _jev_hint_bg():
+                try:
+                    hint = await jev.beri_hint_ruang(pesan)
+                    if hint:
+                        self.brahma.simpan(
+                            "system",
+                            f"[JEV hint bg] rek={hint.get('rekomendasi')}",
+                            {"sumber": "JEV", "jalur": "JEV_HINT_BG"},
+                        )
+                except Exception:
+                    pass
+            try:
+                loop = asyncio.get_event_loop_policy().get_event_loop()
+                loop.run_in_executor(None, lambda: asyncio.run(_jev_hint_bg()))
+            except Exception:
+                pass
 
         # --- JARVIS --------------------------------------------------
         if self.jarvis.cocok(pesan) and not any(
@@ -638,6 +699,27 @@ class HermesPengarah:
 
         # --- ULTRON --------------------------------------------------
         if self.ultron.cocok(pesan):
+            # Safety gate Jev jalan paralel (fire‑and‑forget),
+            # tidak blocking eksekusi perintah
+            async def _jev_safety_bg():
+                try:
+                    safety = await jev.safety_check(pesan, {
+                        "mode_kendali": KENDALI,
+                        "aplikasi_terdaftar": hp.daftar_aplikasi(),
+                    })
+                    if safety and safety.get("aman") is False:
+                        self.brahma.simpan(
+                            "system",
+                            f"[JEV safety bg] risiko={safety.get('tingkat_risiko')}",
+                            {"sumber": "JEV", "jalur": "JEV_SAFETY_BG"},
+                        )
+                except Exception:
+                    pass
+            try:
+                loop = asyncio.get_event_loop_policy().get_event_loop()
+                loop.run_in_executor(None, lambda: asyncio.run(_jev_safety_bg()))
+            except Exception:
+                pass
             hasil = self.ultron.eksekusi(pesan)
             self.brahma.simpan_hasil(pesan, hasil)
             return hasil
@@ -661,8 +743,6 @@ class HermesPengarah:
         self.brahma.simpan_hasil(pesan, fallback)
         return fallback
 
-
-hermes = HermesPengarah()
 
 # ─────────────────────────────────────────────────────────────
 #  🧭 SUMBER KECERDASAN: GEMINI → 9ROUTER
@@ -809,6 +889,293 @@ class PengelolaAI:
 
 ai = PengelolaAI()
 
+# ─────────────────────────────────────────────────────────────
+#  🧭 JEV — TYPESAFE SYSTEM ONE (routing & safety supervisor)
+# ─────────────────────────────────────────────────────────────
+# Jev adalah "System One" model dari TypeSafe AI yang memberikan
+# keputusan terstruktur (choice/score/noul) — bukan teks bebas.
+# Digunakan sebagai lapisan supervisi: routing hint, safety gate,
+# dan konteks kurasi. Berjalan di latar belakang (~70-500ms),
+# tidak memblokir eksekusi utama HERMES.
+#
+# Dokumentasi: https://docs.typesafe.ai/api
+# SDK Python: pip install typesafe-sdk
+# Key: TYPESAFE_API_KEY dari console.typesafe.ai
+# ─────────────────────────────────────────────────────────────
+
+
+class JevSupervisor:
+    """
+    Lapisan supervisi berbasis Jev (TypeSafe System One).
+    Memberikan routing hint, safety gate, dan konteks kurasi
+    untuk HERMES — tanpa memblokir eksekusi utama.
+    """
+
+    def __init__(self):
+        self.base_url = os.getenv("JEV_BASE_URL", "https://api.typesafe.ai/v1")
+        self.endpoint_path = os.getenv("JEV_ENDPOINT_PATH", "/systemone")
+        self.api_key_env = os.getenv("JEV_API_KEY_ENV", "TYPESAFE_API_KEY")
+        self.api_key = os.getenv(self.api_key_env, "")
+        self.jev_model = os.getenv("JEV_MODEL", "jev-latest")
+        self.active = bool(self.api_key)
+        # HTTP client reuse (di‑reuse antar panggilan untuk kurangi overhead koneksi)
+        self._client: Optional[httpx.AsyncClient] = None
+        self.last_hint: Optional[Dict] = None
+
+    # ------------------------------------------------------------------
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Ambil HTTP client yang di‑reuse; buat baru kalau belum ada atau sedang tertutup."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=2.0, limits=httpx.Limits(max_connections=1))
+        return self._client
+
+    async def tutup(self) -> None:
+        """Tutup HTTP client (dipanggil saat server shutdown)."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+
+    # ------------------------------------------------------------------
+    async def _evaluasi(self, state: str, pertanyaan: Dict) -> Optional[Dict]:
+        """
+        Panggil POST /v1/systemone ke API Jev.
+        state   : teks atau struktur yang dievaluasi
+        pertanyaan : dict {id: {type, instructions, ...}}
+        Kembalikan dict jawaban jika berhasil, None jika gagal.
+        """
+        if not self.active:
+            return None
+        try:
+            c = await self._get_client()
+            resp = await c.post(
+                f"{self.base_url}{self.endpoint_path}",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model":     self.jev_model,
+                    "state":     state,
+                    "questions": pertanyaan,
+                },
+            )
+            if resp.status_code == 200:
+                d = resp.json()
+                return d.get("answers", {})
+            else:
+                return None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    async def beri_hint_ruang(self, pesan: str) -> Optional[Dict]:
+        """
+        Evaluasi pesan pengguna dan beri routing hint ke HERMES.
+        Hint berisi:
+          - kompleksitas : score 0-1 (0=sederhana, 1=rumit)
+          - rekomendasi   : "jarvis" | "ultron" | "gemini" | "lokal"
+          - perlu_ai      : noul probability (0-1)
+        Hint bersifat advisory — HERMES tetap memutuskan akhir.
+        """
+        pertanyaan = {
+            "kompleksitas": {
+                "type": "score",
+                "instructions": "Seberapa rumit permintaan pengguna?",
+                "criteria": [
+                    "Sangat sederhana, satu kata kunci saja",
+                    "Sedikit konteks, bisa ditangani lokal",
+                    "Membutuhkan pemrosesan sedang",
+                    "Rumit, butuh AI untuk pemahaman mendalam",
+                    "Sangat kompleks,多层推理 diperlukan",
+                ],
+            },
+            "perlu_ai": {
+                "type": "noul",
+                "instructions": "Apakah pesan ini membutuhkan AI (Gemini/9Router)?",
+            },
+            "jenis_perintah": {
+                "type": "choice",
+                "instructions": "Jenis perintah apa yang paling cocok?",
+                "criteria": {
+                    "sambutan":    "Salam, sapa-sapa, perkenalan (JARVIS)",
+                    "kendali":     "Perintah buka/tutup/notifikasi/status (ULTRON)",
+                    "pertanyaan":  "Pertanyaan umum yang butuh AI (Gemini/9Router)",
+                    "tidak_jelas": "Tidak jelas, butuh klarifikasi",
+                },
+            },
+        }
+        hasil = await self._evaluasi(pesan, pertanyaan)
+        if not hasil:
+            return None
+
+        # Parse hasil menjadi hint ringkas
+        kompleksitas_raw = hasil.get("kompleksitas", {})
+        score_val = 0.0
+        if isinstance(kompleksitas_raw, dict):
+            s = kompleksitas_raw.get("score")
+            if isinstance(s, (int, float)):
+                score_val = float(s) / 4.0  # normalize 0-4 → 0-1
+
+        jenis_raw = hasil.get("jenis_perintah", {})
+        rekomendasi = "gemini"
+        if isinstance(jenis_raw, dict):
+            choice_val = jenis_raw.get("choice", "")
+            peta = {
+                "sambutan":   "jarvis",
+                "kendali":    "ultron",
+                "pertanyaan": "gemini",
+                "tidak_jelas":"lokal",
+            }
+            rekomendasi = peta.get(choice_val, "gemini")
+
+        perlu_ai_raw = hasil.get("perlu_ai", {})
+        perlu_ai = 0.5
+        if isinstance(perlu_ai_raw, dict):
+            n = perlu_ai_raw.get("noul")
+            if isinstance(n, (int, float)):
+                perlu_ai = float(n)
+
+        hint = {
+            "sumber":     "JEV",
+            "kompleksitas": round(score_val, 3),
+            "rekomendasi":  rekomendasi,
+            "perlu_ai":     round(perlu_ai, 3),
+            "active":       self.active,
+        }
+        self.last_hint = hint
+        return hint
+
+    # ------------------------------------------------------------------
+    async def safety_check(self, perintah: str, konteks_sistem: Dict) -> Dict:
+        """
+        Safety gate untuk perintah ULTRON.
+        Menentukan apakah perintah aman untuk dieksekusi langsung,
+        perlu konfirmasi, atau ditolak.
+        """
+        state = json.dumps({
+            "perintah": perintah,
+            "mode_kendali": konteks_sistem.get("mode_kendali", "TIDAK_AKTIF"),
+            "aplikasi_terdaftar": konteks_sistem.get("aplikasi_terdaftar", []),
+        }, ensure_ascii=False)
+        pertanyaan = {
+            "aman": {
+                "type": "noul",
+                "instructions": "Apakah perintah ini aman untuk dieksekusi tanpa konfirmasi?",
+            },
+            "tingkat_risiko": {
+                "type": "score",
+                "instructions": "Seberapa tinggi risiko perintah ini?",
+                "criteria": [
+                    "Sangat rendah, aman untuk dieksekusi langsung",
+                    "Rendah, minor risk",
+                    "Sedang, perlu pertimbangan",
+                    "Tinggi, sebaiknya dikonfirmasi dulu",
+                    "Sangat tinggi, berpotensi berbahaya",
+                ],
+            },
+        }
+        hasil = await self._evaluasi(state, pertanyaan)
+        if not hasil:
+            return {"aman": None, "tingkat_risiko": None, "sumber": "JEV (gagal)"}
+
+        aman_raw = hasil.get("aman", {})
+        aman = None
+        if isinstance(aman_raw, dict):
+            n = aman_raw.get("noul")
+            if isinstance(n, (int, float)):
+                aman = float(n) > 0.5
+
+        risiko_raw = hasil.get("tingkat_risiko", {})
+        risiko = 0.0
+        if isinstance(risiko_raw, dict):
+            s = risiko_raw.get("score")
+            if isinstance(s, (int, float)):
+                risiko = float(s) / 4.0
+
+        return {
+            "aman":         aman,
+            "tingkat_risiko": round(risiko, 3),
+            "sumber":       "JEV",
+        }
+
+    # ------------------------------------------------------------------
+    async def kurasi_konteks(self, riwayat: List[Dict]) -> List[Dict]:
+        """
+        Kurasi riwayat percakapan untuk compaction.
+        Masing-masing entri dinilai: keep / truncate / drop.
+        """
+        if not riwayat or not self.active:
+            return riwayat
+
+        state = json.dumps([
+            {
+                "peran":  e.get("peran", ""),
+                "isi":   e.get("isi", "")[:200],
+                "timestamp": e.get("timestamp", ""),
+            }
+            for e in riwayat[-8:]
+        ], ensure_ascii=False)
+
+        pertanyaan = {
+            "pernah_penting": {
+                "type": "noul",
+                "instructions": "Apakah entri ini pernah penting untuk konteks masa depan?",
+            },
+            "bisa_drop": {
+                "type": "noul",
+                "instructions": "Bisakah entri ini dihapus tanpa kehilangan konteks?",
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as c:
+                resp = await c.post(
+                    f"{self.base_url}{self.endpoint_path}",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model":     self.jev_model,
+                        "state":     state,
+                        "questions": pertanyaan,
+                    },
+                )
+                if resp.status_code != 200:
+                    return riwayat
+                d = resp.json()
+                jawaban = d.get("answers", {})
+        except Exception:
+            return riwayat
+
+        kurasi = []
+        for i, entri in enumerate(riwayat):
+            idx = str(i)
+            pernah_penting = jawaban.get(f"pernah_penting_{idx}", {})
+            bisa_drop = jawaban.get(f"bisa_drop_{idx}", {})
+            pp_val = 0.5
+            bd_val = 0.5
+            if isinstance(pernah_penting, dict):
+                n1 = pernah_penting.get("noul")
+                if isinstance(n1, (int, float)):
+                    pp_val = float(n1)
+            if isinstance(bisa_drop, dict):
+                n2 = bisa_drop.get("noul")
+                if isinstance(n2, (int, float)):
+                    bd_val = float(n2)
+            if pp_val > 0.5 and bd_val < 0.5:
+                entri["jev_kurasi"] = "keep"
+            elif bd_val > 0.5:
+                entri["jev_kurasi"] = "drop"
+            else:
+                entri["jev_kurasi"] = "truncate"
+            kurasi.append(entri)
+
+        return kurasi
+
+
+# Buat instance JevSupervisor (akan aktif jika TYPESAFE_API_KEY di-set)
+jev = JevSupervisor()
+
 # Hubungkan HERMES ke AI
 hermes.set_ai(ai)
 
@@ -825,9 +1192,26 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def log_request(request, call_next):
+    logger.info(f"{request.method} {request.url.path} dari {request.client.host if request.client else '?'}")
+    response = await call_next(request)
+    logger.info(f"→ {response.status_code} {request.url.path}")
+    return response
+
+
 @app.on_event("startup")
 async def startup_event():
+    logger.info("Memeriksa sumber AI …")
     await ai.cek_sumber()
+    # Cek ketersediaan JEV
+    logger.info("Memeriksa JEV (TypeSafe System One) …")
+    if jev.active:
+        logger.info(f"    JEV          → ✅ aktif (model: {jev.jev_model})")
+    else:
+        logger.warning("    JEV          → ⚠️  TYPESAFE_API_KEY tidak diatur")
+
+    logger.info("JABRIG siap.")
 
 
 # ------------------------------------------------------------

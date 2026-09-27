@@ -1,0 +1,4 @@
+- [ ] **Fact verification**: Validate hot (high-priority) memory facts with MS-Agent Deep Research.
+- [ ] **Agent evolution**
+  - [ ] **Page UX**: Dynamically show evolving agents on the page, with one-click view and import.
+  - [ ] **Trajectory → Model → Agent**: Self-collect trajectories → self-label → train an LLM → integrate with Agent; use the Ultron-trained small model as a router (replacing a large model on simple tasks) while keeping full-capability behavior unchanged.
