@@ -81,8 +81,8 @@ logger = logging.getLogger("jabrig")
 class _PrintToLogger:
     def write(self, msg):
         if msg.strip():
-            logger.info(msg.rstrip("
-"))
+            logger.info(msg.rstrip("\n"))
+
     def flush(self):
         pass
 
@@ -485,9 +485,9 @@ class Jarvis:
         )
 
         perkenalan = (
-            "Saya JARVIS, antarmuka percakapan JABRIG.\n"
+            "Halo! Saya Jabrig, asisten kecerdasan terpadu Anda.\n\n"
             "Ada ULTRON untuk kendali perangkat dan BRAHMA AI\n"
-            "untuk ingatan serta pemahaman. Kami siap membantu Anda."
+            "untuk ingatan serta pemahaman. Saya siap membantu Anda."
         )
 
         return {
