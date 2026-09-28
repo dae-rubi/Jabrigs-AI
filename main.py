@@ -39,10 +39,14 @@ GUNAKAN_TERMUX_API = IS_TERMUX
 GUNAKAN_ADB = False
 
 if not IS_TERMUX:
-    try:
-        jawab = input("Aktifkan kendali via ADB? (y/n): ").strip().lower()
-        GUNAKAN_ADB = jawab.startswith("y")
-    except Exception:
+    # Jika stdin tidak terhubung ke terminal (non-interaktif), skip pertanyaan
+    if sys.stdin.isatty():
+        try:
+            jawab = input("Aktifkan kendali via ADB? (y/n): ").strip().lower()
+            GUNAKAN_ADB = jawab.startswith("y")
+        except Exception:
+            GUNAKAN_ADB = False
+    else:
         GUNAKAN_ADB = False
 
 MODE_KENDALI = "termux_api" if GUNAKAN_TERMUX_API else ("adb" if GUNAKAN_ADB else "tidak_aktif")
