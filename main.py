@@ -110,7 +110,7 @@ except Exception as e:
 from actions import discover_actions
 
 _actions_dir = BASE_DIR / "actions"
-_action_registry = discover_actions(_actions_dir, reserved_names={"open_app", "close_app", "ambil_layar", "kirim_notifikasi", "system_status"})
+_action_registry = discover_actions(_actions_dir, reserved_names=set())
 
 def run_action(name: str, parameters: dict, ctx: dict | None = None) -> dict:
     try:
