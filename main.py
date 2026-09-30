@@ -571,6 +571,8 @@ class JabrigChat:
                 "sumber": "JEV",
                 "jawab": f"⛔ Batal: {jev_hasil.get('catatan', 'Tidak diizinkan oleh JEV')}",
                 "jalur": "JEV_BLOCK",
+                "jev_note": jev_hasil.get("catatan", ""),
+                "jev_reason": jev_hasil.get("catatan", "tidak diizinkan"),
             }
 
         # Tujuan khusus
